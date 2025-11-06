@@ -56,7 +56,7 @@ SOL_WALLET2_ADDRESS = os.environ.get("SOL_WALLET2_ADDRESS", "")
 SOL_MIDDLEMAN_ADDRESS = os.environ.get("SOL_MIDDLEMAN_ADDRESS", "")
 SOL_MIDDLEMAN_PRIVATE_KEY = os.environ.get("SOL_MIDDLEMAN_PRIVATE_KEY", "")
 SOLSCAN_API_KEY = os.environ.get("SOLSCAN_API_KEY", "")  # Optional
-SOL_CHECK_INTERVAL = int(os.environ.get("SOL_CHECK_INTERVAL", "30"))  # Check every 30 seconds
+SOL_CHECK_INTERVAL = int(os.environ.get("SOL_CHECK_INTERVAL", "60"))  # Check every 60 seconds
 
 # Legacy support for single ADMIN_ID
 ADMIN_ID = None

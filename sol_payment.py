@@ -43,7 +43,7 @@ SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
 # SOL to EUR conversion rate cache
 sol_price_cache = {'price': Decimal('0'), 'timestamp': 0}
-PRICE_CACHE_DURATION = 300  # Cache price for 5 minutes to avoid CoinGecko rate limits
+PRICE_CACHE_DURATION = 5400  # Cache price for 1.5 hours (90 minutes) to avoid CoinGecko rate limits
 
 # Solana client
 solana_client = None
@@ -710,6 +710,7 @@ async def check_pending_payments(context):
             user_id = payment['user_id']
             expected_amount = Decimal(str(payment['expected_sol_amount']))
             expected_wallet = payment['expected_wallet']
+            created_at = datetime.fromisoformat(payment['created_at'])
             expires_at = datetime.fromisoformat(payment['expires_at'])
             
             # Check if payment expired
@@ -747,19 +748,32 @@ async def check_pending_payments(context):
             transactions = await check_wallet_transactions(wallet_address, limit=20)
             logger.info(f"📊 Found {len(transactions)} transaction(s) for wallet {wallet_address[:8]}...")
             
-            # Look for matching transaction (allow 2% tolerance for price fluctuation)
-            tolerance = expected_amount * Decimal('0.02')
-            logger.debug(f"Tolerance range: {expected_amount - tolerance:.6f} to {expected_amount + tolerance:.6f} SOL")
+            # Look for matching transaction (allow 1% tolerance for price fluctuation/fees)
+            tolerance = expected_amount * Decimal('0.01')
+            min_amount = expected_amount - tolerance
+            max_amount = expected_amount + tolerance
+            logger.debug(f"Tolerance range: {min_amount:.6f} to {max_amount:.6f} SOL")
+            
+            # Only consider recent transactions (within 30 minutes of payment creation)
+            recent_cutoff = created_at - timedelta(minutes=30)
             
             for tx in transactions:
                 tx_amount = tx['amount_sol']
                 tx_signature = tx['signature']
+                tx_timestamp = tx.get('timestamp')
+                
+                # Skip transactions that are too old (before payment was created minus 30 min buffer)
+                if tx_timestamp:
+                    tx_datetime = datetime.fromtimestamp(tx_timestamp, tz=timezone.utc)
+                    if tx_datetime < recent_cutoff:
+                        logger.debug(f"Skipping old transaction {tx_signature[:16]}... from {tx_datetime.isoformat()}")
+                        continue
                 
                 logger.debug(f"Checking TX {tx_signature[:16]}...: {tx_amount:.6f} SOL")
                 
-                # Check if transaction matches expected amount (within tolerance)
-                if tx_amount >= (expected_amount - tolerance):
-                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL")
+                # Check if transaction matches expected amount (within tolerance, both upper AND lower bounds)
+                if min_amount <= tx_amount <= max_amount:
+                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL (expected: {expected_amount:.6f} ±1%)")
                     # Check if we already processed this transaction
                     c.execute("""
                         SELECT signature FROM processed_sol_transactions 
@@ -770,44 +784,66 @@ async def check_pending_payments(context):
                         logger.debug(f"Transaction {tx_signature} already processed")
                         continue
                     
+                    # Also verify this transaction isn't already assigned to another payment
+                    c.execute("""
+                        SELECT payment_id FROM processed_sol_transactions 
+                        WHERE signature = ? AND payment_id != ?
+                    """, (tx_signature, payment_id))
+                    
+                    if c.fetchone():
+                        logger.warning(f"Transaction {tx_signature} already used for different payment")
+                        continue
+                    
                     # Verify transaction is confirmed
                     tx_verified = await verify_sol_transaction(tx_signature)
                     
-                    if tx_verified and tx_verified.get('confirmed'):
-                        logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
+                    if not (tx_verified and tx_verified.get('confirmed')):
+                        logger.warning(f"Transaction {tx_signature} not confirmed yet")
+                        continue
+                    
+                    logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
+                    
+                    # Start atomic transaction for race condition safety
+                    try:
+                        c.execute("BEGIN IMMEDIATE")
                         
-                        # Mark transaction as processed first
+                        # Re-check if transaction was processed (race condition protection)
                         c.execute("""
-                            INSERT INTO processed_sol_transactions 
-                            (signature, payment_id, processed_at, amount)
-                            VALUES (?, ?, ?, ?)
-                        """, (
-                            tx_signature,
-                            payment_id,
-                            datetime.now(timezone.utc).isoformat(),
-                            float(tx_amount)
-                        ))
-                        conn.commit()
+                            SELECT signature FROM processed_sol_transactions 
+                            WHERE signature = ?
+                        """, (tx_signature,))
                         
-                        # If payment went to middleman, forward it
+                        if c.fetchone():
+                            logger.warning(f"Transaction {tx_signature} was processed by another thread, skipping")
+                            c.execute("ROLLBACK")
+                            continue
+                        
+                        # If payment went to middleman, forward it BEFORE marking as processed
+                        forward_success = True
                         if expected_wallet == 'middleman':
                             logger.info(f"🔄 Payment to middleman, initiating split forward...")
+                            # Rollback transaction temporarily for forwarding
+                            c.execute("ROLLBACK")
+                            
                             forward_results = await forward_split_payment(
                                 payment_id,
                                 tx_signature,
                                 tx_amount
                             )
                             
-                            if not all(forward_results.values()):
-                                logger.error(f"❌ Split forward partially failed: {forward_results}")
+                            forward_success = all(forward_results.values())
+                            
+                            if not forward_success:
+                                logger.error(f"❌ Split forward failed: {forward_results}")
                                 # Alert admin
                                 if get_first_primary_admin_id():
                                     admin_msg = (
                                         f"⚠️ SPLIT PAYMENT FORWARD FAILED\n"
                                         f"Payment: {payment_id}\n"
+                                        f"TX: {tx_signature}\n"
                                         f"Amount: {tx_amount} SOL\n"
-                                        f"Wallet1: {'✅' if forward_results['wallet1'] else '❌'}\n"
-                                        f"Wallet2: {'✅' if forward_results['wallet2'] else '❌'}\n"
+                                        f"Wallet1: {'✅' if forward_results.get('wallet1') else '❌'}\n"
+                                        f"Wallet2: {'✅' if forward_results.get('wallet2') else '❌'}\n"
                                         f"Manual intervention required!"
                                     )
                                     try:
@@ -819,9 +855,34 @@ async def check_pending_payments(context):
                                         )
                                     except Exception:
                                         pass
-                                
-                                # Don't mark payment as confirmed if forward failed
+                                # Don't process payment if forward failed
                                 continue
+                            
+                            # Restart atomic transaction after successful forwarding
+                            c.execute("BEGIN IMMEDIATE")
+                            
+                            # Re-check again after forwarding (another race condition check)
+                            c.execute("""
+                                SELECT signature FROM processed_sol_transactions 
+                                WHERE signature = ?
+                            """, (tx_signature,))
+                            
+                            if c.fetchone():
+                                logger.warning(f"Transaction {tx_signature} was processed during forwarding, skipping")
+                                c.execute("ROLLBACK")
+                                continue
+                        
+                        # Mark transaction as processed (atomic with payment confirmation)
+                        c.execute("""
+                            INSERT INTO processed_sol_transactions 
+                            (signature, payment_id, processed_at, amount)
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            tx_signature,
+                            payment_id,
+                            datetime.now(timezone.utc).isoformat(),
+                            float(tx_amount)
+                        ))
                         
                         # Mark payment as confirmed
                         c.execute("""
@@ -829,22 +890,33 @@ async def check_pending_payments(context):
                             SET status = 'confirmed', transaction_signature = ?
                             WHERE payment_id = ?
                         """, (tx_signature, payment_id))
+                        
+                        # Commit atomic transaction
                         conn.commit()
+                        logger.info(f"✅ Transaction {tx_signature} and payment {payment_id} atomically processed")
                         
-                        # Process the purchase
-                        basket_snapshot = json.loads(payment['basket_snapshot'])
-                        discount_code = payment['discount_code']
-                        
-                        await finalize_sol_purchase(
-                            user_id=user_id,
-                            basket_snapshot=basket_snapshot,
-                            discount_code=discount_code,
-                            payment_id=payment_id,
-                            transaction_signature=tx_signature,
-                            context=context
-                        )
-                        
-                        break  # Payment processed, move to next pending payment
+                    except Exception as atomic_error:
+                        logger.error(f"Error in atomic transaction processing: {atomic_error}")
+                        try:
+                            c.execute("ROLLBACK")
+                        except:
+                            pass
+                        continue
+                    
+                    # Process the purchase (outside atomic transaction)
+                    basket_snapshot = json.loads(payment['basket_snapshot'])
+                    discount_code = payment['discount_code']
+                    
+                    await finalize_sol_purchase(
+                        user_id=user_id,
+                        basket_snapshot=basket_snapshot,
+                        discount_code=discount_code,
+                        payment_id=payment_id,
+                        transaction_signature=tx_signature,
+                        context=context
+                    )
+                    
+                    break  # Payment processed, move to next pending payment
         
     except sqlite3.Error as e:
         logger.error(f"Database error checking payments: {e}")
