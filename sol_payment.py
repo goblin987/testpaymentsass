@@ -277,6 +277,8 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         List of transaction dictionaries with incoming transfers
     """
     try:
+        logger.debug(f"Fetching signatures for {wallet_address[:8]}...")
+        
         def fetch_signatures():
             # Get recent transaction signatures for this address
             pubkey = Pubkey.from_string(wallet_address)
@@ -290,7 +292,10 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         sig_response = await asyncio.to_thread(fetch_signatures)
         
         if not sig_response or not sig_response.value:
+            logger.warning(f"No signature response for {wallet_address[:8]}...")
             return []
+        
+        logger.debug(f"Found {len(sig_response.value)} signature(s) for {wallet_address[:8]}...")
         
         transactions = []
         
@@ -655,18 +660,25 @@ async def check_pending_payments(context):
             else:  # middleman
                 wallet_address = SOL_MIDDLEMAN_ADDRESS
             
+            logger.info(f"💳 Payment {payment_id}: expecting {expected_amount:.6f} SOL to {wallet_address[:8]}...")
+            
             # Check recent transactions to this wallet
             transactions = await check_wallet_transactions(wallet_address, limit=20)
+            logger.info(f"📊 Found {len(transactions)} transaction(s) for wallet {wallet_address[:8]}...")
             
             # Look for matching transaction (allow 2% tolerance for price fluctuation)
             tolerance = expected_amount * Decimal('0.02')
+            logger.debug(f"Tolerance range: {expected_amount - tolerance:.6f} to {expected_amount + tolerance:.6f} SOL")
             
             for tx in transactions:
                 tx_amount = tx['amount_sol']
                 tx_signature = tx['signature']
                 
+                logger.debug(f"Checking TX {tx_signature[:16]}...: {tx_amount:.6f} SOL")
+                
                 # Check if transaction matches expected amount (within tolerance)
                 if tx_amount >= (expected_amount - tolerance):
+                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL")
                     # Check if we already processed this transaction
                     c.execute("""
                         SELECT signature FROM processed_sol_transactions 
