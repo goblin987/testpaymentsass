@@ -121,22 +121,31 @@ async def get_sol_price_eur() -> Optional[Decimal]:
         
     except requests.exceptions.HTTPError as e:
         if '429' in str(e):
-            logger.warning(f"CoinGecko rate limit hit. Using cached price.")
+            logger.warning(f"CoinGecko rate limit hit. Using cached or default price.")
         else:
             logger.error(f"HTTP error fetching SOL price: {e}")
         # Return cached price even if expired
         if sol_price_cache['price'] > Decimal('0'):
             logger.info(f"Using cached SOL price: {sol_price_cache['price']:.2f} EUR (age: {int(time.time() - sol_price_cache['timestamp'])}s)")
             return sol_price_cache['price']
-        logger.error("Failed to fetch SOL price and no cache available")
-        return None
+        # Last resort: use approximate default price
+        default_price = Decimal('135.0')  # Approximate SOL price
+        logger.warning(f"No cache available. Using default SOL price: {default_price:.2f} EUR")
+        sol_price_cache['price'] = default_price  # Cache it for next time
+        sol_price_cache['timestamp'] = time.time()
+        return default_price
     except Exception as e:
         logger.error(f"Error fetching SOL price: {e}")
         # Return cached price even if expired, better than nothing
         if sol_price_cache['price'] > Decimal('0'):
             logger.warning(f"Using expired cached SOL price: {sol_price_cache['price']:.2f} EUR")
             return sol_price_cache['price']
-        return None
+        # Last resort: use approximate default price
+        default_price = Decimal('135.0')
+        logger.warning(f"Using default SOL price: {default_price:.2f} EUR")
+        sol_price_cache['price'] = default_price
+        sol_price_cache['timestamp'] = time.time()
+        return default_price
 
 
 def determine_payment_wallet(basket_snapshot: list) -> str:
