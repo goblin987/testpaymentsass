@@ -42,7 +42,7 @@ SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
 # SOL to EUR conversion rate cache
 sol_price_cache = {'price': Decimal('0'), 'timestamp': 0}
-PRICE_CACHE_DURATION = 60  # Cache price for 60 seconds
+PRICE_CACHE_DURATION = 300  # Cache price for 5 minutes to avoid CoinGecko rate limits
 
 # Solana client
 solana_client = None
@@ -114,11 +114,22 @@ async def get_sol_price_eur() -> Optional[Decimal]:
         logger.info(f"💶 SOL price: {price:.2f} EUR")
         return price
         
+    except requests.exceptions.HTTPError as e:
+        if '429' in str(e):
+            logger.warning(f"CoinGecko rate limit hit. Using cached price.")
+        else:
+            logger.error(f"HTTP error fetching SOL price: {e}")
+        # Return cached price even if expired
+        if sol_price_cache['price'] > Decimal('0'):
+            logger.info(f"Using cached SOL price: {sol_price_cache['price']:.2f} EUR (age: {int(time.time() - sol_price_cache['timestamp'])}s)")
+            return sol_price_cache['price']
+        logger.error("Failed to fetch SOL price and no cache available")
+        return None
     except Exception as e:
         logger.error(f"Error fetching SOL price: {e}")
         # Return cached price even if expired, better than nothing
         if sol_price_cache['price'] > Decimal('0'):
-            logger.warning("Using expired cached SOL price")
+            logger.warning(f"Using expired cached SOL price: {sol_price_cache['price']:.2f} EUR")
             return sol_price_cache['price']
         return None
 
@@ -256,52 +267,91 @@ async def create_sol_payment(
 
 async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> List[Dict]:
     """
-    Check recent transactions for a Solana wallet using Solscan API.
+    Check recent transactions for a Solana wallet using Solana RPC.
     
     Returns:
         List of transaction dictionaries with incoming transfers
     """
     try:
-        def fetch_transactions():
-            headers = {}
-            if SOLSCAN_API_KEY:
-                headers['token'] = SOLSCAN_API_KEY
-            
-            # Get recent SOL transfers to this wallet (using correct endpoint with capital T)
-            url = f"{SOLSCAN_API_URL}/account/solTransfers"
-            params = {
-                'account': wallet_address,
-                'limit': limit
-            }
-            
-            response = requests.get(url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
-            return response.json()
+        def fetch_signatures():
+            # Get recent transaction signatures for this address
+            pubkey = Pubkey.from_string(wallet_address)
+            response = solana_client.get_signatures_for_address(
+                pubkey,
+                limit=limit,
+                commitment=Confirmed
+            )
+            return response
         
-        data = await asyncio.to_thread(fetch_transactions)
+        sig_response = await asyncio.to_thread(fetch_signatures)
         
-        # Extract incoming transfer information
-        # Solscan API returns array directly for free tier
+        if not sig_response or not sig_response.value:
+            return []
+        
         transactions = []
-        data_list = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
         
-        for tx in data_list:
-            # Only process incoming transfers (where our wallet is the destination)
-            dst = tx.get('dst')
-            if dst and dst.lower() == wallet_address.lower():
-                signature = tx.get('txHash')
-                block_time = tx.get('blockTime')
-                lamports = tx.get('lamport', 0)
+        # Process each signature to get transaction details
+        for sig_info in sig_response.value:
+            signature = str(sig_info.signature)
+            block_time = sig_info.block_time
+            
+            # Skip if transaction failed
+            if sig_info.err:
+                continue
+            
+            try:
+                # Fetch full transaction details
+                def fetch_transaction():
+                    return solana_client.get_transaction(
+                        signature,
+                        encoding="jsonParsed",
+                        commitment=Confirmed,
+                        max_supported_transaction_version=0
+                    )
                 
-                if signature and lamports:
-                    sol_amount = Decimal(lamports) / Decimal('1000000000')  # Convert lamports to SOL
-                    transactions.append({
-                        'signature': signature,
-                        'timestamp': block_time,
-                        'amount_sol': sol_amount,
-                        'src': tx.get('src'),  # Source address
-                        'dst': dst
-                    })
+                tx_response = await asyncio.to_thread(fetch_transaction)
+                
+                if not tx_response or not tx_response.value:
+                    continue
+                
+                tx_data = tx_response.value
+                
+                # Parse transaction to find SOL transfers to our wallet
+                if tx_data.transaction and tx_data.transaction.meta:
+                    meta = tx_data.transaction.meta
+                    
+                    # Check pre and post balances to find incoming SOL
+                    if hasattr(tx_data.transaction.transaction, 'message'):
+                        message = tx_data.transaction.transaction.message
+                        account_keys = message.account_keys
+                        
+                        # Find our wallet's index in the account keys
+                        our_index = None
+                        for idx, key in enumerate(account_keys):
+                            key_str = str(key.pubkey) if hasattr(key, 'pubkey') else str(key)
+                            if key_str == wallet_address:
+                                our_index = idx
+                                break
+                        
+                        if our_index is not None and meta.pre_balances and meta.post_balances:
+                            pre_balance = meta.pre_balances[our_index]
+                            post_balance = meta.post_balances[our_index]
+                            
+                            # Check if this is an incoming transfer (balance increased)
+                            if post_balance > pre_balance:
+                                lamports_received = post_balance - pre_balance
+                                sol_amount = Decimal(lamports_received) / Decimal('1000000000')
+                                
+                                transactions.append({
+                                    'signature': signature,
+                                    'timestamp': block_time,
+                                    'amount_sol': sol_amount,
+                                    'confirmed': True
+                                })
+            
+            except Exception as tx_error:
+                logger.debug(f"Could not process transaction {signature[:8]}...: {tx_error}")
+                continue
         
         return transactions
         
