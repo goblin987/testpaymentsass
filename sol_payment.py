@@ -1,0 +1,807 @@
+"""
+Solana Payment Module
+Handles SOL payments with automatic splitting via middleman wallet.
+"""
+
+import logging
+import requests
+import asyncio
+import time
+import json
+import sqlite3
+import base58
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, List
+
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.system_program import TransferParams, transfer
+from solders.transaction import Transaction
+from solders.message import Message
+from solders.rpc.responses import GetLatestBlockhashResp
+from solana.rpc.api import Client as SolanaClient
+from solana.rpc.commitment import Confirmed
+
+from utils import (
+    get_db_connection, format_currency, LANGUAGES,
+    send_message_with_retry, get_first_primary_admin_id
+)
+
+logger = logging.getLogger(__name__)
+
+# Will be imported from utils after configuration
+SOL_WALLET1_ADDRESS = None
+SOL_WALLET2_ADDRESS = None
+SOL_MIDDLEMAN_ADDRESS = None
+SOL_MIDDLEMAN_KEYPAIR = None
+SOLSCAN_API_URL = None
+SOLSCAN_API_KEY = None
+SOL_CHECK_INTERVAL = 30
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+
+# SOL to EUR conversion rate cache
+sol_price_cache = {'price': Decimal('0'), 'timestamp': 0}
+PRICE_CACHE_DURATION = 60  # Cache price for 60 seconds
+
+# Solana client
+solana_client = None
+
+
+def init_sol_config():
+    """Initialize Solana configuration from utils."""
+    global SOL_WALLET1_ADDRESS, SOL_WALLET2_ADDRESS, SOL_MIDDLEMAN_ADDRESS
+    global SOL_MIDDLEMAN_KEYPAIR, SOLSCAN_API_URL, SOLSCAN_API_KEY
+    global SOL_CHECK_INTERVAL, solana_client
+    
+    from utils import (
+        SOL_WALLET1_ADDRESS as w1,
+        SOL_WALLET2_ADDRESS as w2,
+        SOL_MIDDLEMAN_ADDRESS as mm,
+        SOL_MIDDLEMAN_PRIVATE_KEY as mm_key,
+        SOLSCAN_API_URL as api_url,
+        SOLSCAN_API_KEY as api_key,
+        SOL_CHECK_INTERVAL as check_interval
+    )
+    
+    SOL_WALLET1_ADDRESS = w1
+    SOL_WALLET2_ADDRESS = w2
+    SOL_MIDDLEMAN_ADDRESS = mm
+    SOLSCAN_API_URL = api_url
+    SOLSCAN_API_KEY = api_key
+    SOL_CHECK_INTERVAL = check_interval
+    
+    # Initialize middleman keypair from private key
+    try:
+        private_key_bytes = base58.b58decode(mm_key)
+        SOL_MIDDLEMAN_KEYPAIR = Keypair.from_bytes(private_key_bytes)
+        logger.info(f"✅ Middleman keypair initialized: {str(SOL_MIDDLEMAN_KEYPAIR.pubkey())[:8]}...")
+    except Exception as e:
+        logger.error(f"Failed to initialize middleman keypair: {e}")
+        raise
+    
+    # Initialize Solana RPC client
+    solana_client = SolanaClient(SOLANA_RPC_URL)
+    logger.info(f"✅ Solana client initialized: {SOLANA_RPC_URL}")
+
+
+async def get_sol_price_eur() -> Optional[Decimal]:
+    """Get current SOL price in EUR from CoinGecko API."""
+    global sol_price_cache
+    
+    # Return cached price if still valid
+    if time.time() - sol_price_cache['timestamp'] < PRICE_CACHE_DURATION:
+        if sol_price_cache['price'] > Decimal('0'):
+            return sol_price_cache['price']
+    
+    try:
+        def fetch_price():
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={'ids': 'solana', 'vs_currencies': 'eur'},
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        
+        data = await asyncio.to_thread(fetch_price)
+        price = Decimal(str(data['solana']['eur']))
+        
+        # Update cache
+        sol_price_cache['price'] = price
+        sol_price_cache['timestamp'] = time.time()
+        
+        logger.info(f"💶 SOL price: {price:.2f} EUR")
+        return price
+        
+    except Exception as e:
+        logger.error(f"Error fetching SOL price: {e}")
+        # Return cached price even if expired, better than nothing
+        if sol_price_cache['price'] > Decimal('0'):
+            logger.warning("Using expired cached SOL price")
+            return sol_price_cache['price']
+        return None
+
+
+def determine_payment_wallet(basket_snapshot: list) -> str:
+    """
+    Determine which wallet should receive payment based on basket items.
+    
+    Rules:
+    - If all items use same wallet, use that wallet
+    - If any item is split, use middleman (will forward automatically)
+    - If mixed wallets, use middleman (safer, can be manually distributed)
+    """
+    if not basket_snapshot:
+        return 'wallet1'
+    
+    wallets = set()
+    has_split = False
+    
+    for item in basket_snapshot:
+        payout_wallet = item.get('payout_wallet', 'wallet1')
+        if payout_wallet == 'split':
+            has_split = True
+        wallets.add(payout_wallet)
+    
+    # If any item is split, use middleman
+    if has_split:
+        return 'middleman'
+    
+    # If all items use same wallet, use that wallet directly
+    if len(wallets) == 1:
+        return wallets.pop()
+    
+    # Mixed wallets, use middleman for safety
+    return 'middleman'
+
+
+async def create_sol_payment(
+    user_id: int,
+    basket_snapshot: list,
+    total_eur: Decimal,
+    discount_code: Optional[str] = None
+) -> dict:
+    """
+    Create a SOL payment request.
+    Determines which wallet(s) should receive payment based on basket items.
+    
+    Returns:
+        dict with payment details or error
+    """
+    try:
+        # Get SOL price
+        sol_price = await get_sol_price_eur()
+        if not sol_price or sol_price <= Decimal('0'):
+            logger.error("Failed to fetch SOL price")
+            return {'error': 'price_fetch_failed'}
+        
+        # Calculate SOL amount needed (add 1% buffer for price fluctuation)
+        sol_amount_base = (total_eur / sol_price).quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        sol_amount = sol_amount_base * Decimal('1.01')  # 1% buffer
+        sol_amount = sol_amount.quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        
+        # Minimum SOL amount (0.01 SOL to avoid dust)
+        min_sol = Decimal('0.01')
+        if sol_amount < min_sol:
+            return {
+                'error': 'amount_too_low',
+                'min_sol': float(min_sol),
+                'min_eur': float(min_sol * sol_price)
+            }
+        
+        # Determine which wallet should receive payment
+        target_wallet = determine_payment_wallet(basket_snapshot)
+        
+        # Generate unique payment ID
+        payment_id = f"SOL_{user_id}_{int(time.time())}_{hex(int(time.time() * 1000000))[-6:]}"
+        
+        # Store pending payment in database
+        conn = None
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            
+            now = datetime.now(timezone.utc)
+            expires = now + timedelta(minutes=20)  # 20 minute expiry
+            
+            c.execute("""
+                INSERT INTO pending_sol_payments 
+                (payment_id, user_id, expected_sol_amount, expected_wallet, 
+                 basket_snapshot, discount_code, created_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                payment_id,
+                user_id,
+                float(sol_amount),
+                target_wallet,
+                json.dumps(basket_snapshot),
+                discount_code,
+                now.isoformat(),
+                expires.isoformat()
+            ))
+            
+            conn.commit()
+            logger.info(f"✅ Created SOL payment {payment_id}: {sol_amount} SOL (~{total_eur} EUR) to {target_wallet}")
+            
+        except sqlite3.Error as e:
+            logger.error(f"Database error creating SOL payment: {e}")
+            return {'error': 'database_error'}
+        finally:
+            if conn:
+                conn.close()
+        
+        # Get wallet address to display
+        if target_wallet == 'wallet1':
+            wallet_address = SOL_WALLET1_ADDRESS
+        elif target_wallet == 'wallet2':
+            wallet_address = SOL_WALLET2_ADDRESS
+        else:  # middleman
+            wallet_address = SOL_MIDDLEMAN_ADDRESS
+        
+        return {
+            'payment_id': payment_id,
+            'sol_amount': float(sol_amount),
+            'sol_price_eur': float(sol_price),
+            'total_eur': float(total_eur),
+            'wallet_address': wallet_address,
+            'wallet_name': target_wallet,
+            'expires_at': expires.isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating SOL payment: {e}", exc_info=True)
+        return {'error': 'internal_error'}
+
+
+async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> List[Dict]:
+    """
+    Check recent transactions for a Solana wallet using Solscan API.
+    
+    Returns:
+        List of transaction dictionaries with incoming transfers
+    """
+    try:
+        def fetch_transactions():
+            headers = {}
+            if SOLSCAN_API_KEY:
+                headers['token'] = SOLSCAN_API_KEY
+            
+            # Get recent SOL transfers to this wallet
+            url = f"{SOLSCAN_API_URL}/account/soltransfer"
+            params = {
+                'account': wallet_address,
+                'limit': limit
+            }
+            
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        
+        data = await asyncio.to_thread(fetch_transactions)
+        
+        # Extract incoming transfer information
+        transactions = []
+        if isinstance(data, dict) and 'data' in data:
+            for tx in data['data']:
+                # Only process incoming transfers (where our wallet is the destination)
+                dst = tx.get('dst')
+                if dst and dst.lower() == wallet_address.lower():
+                    signature = tx.get('txHash')
+                    block_time = tx.get('blockTime')
+                    lamports = tx.get('lamport', 0)
+                    
+                    if signature and lamports:
+                        sol_amount = Decimal(lamports) / Decimal('1000000000')  # Convert lamports to SOL
+                        transactions.append({
+                            'signature': signature,
+                            'timestamp': block_time,
+                            'amount_sol': sol_amount,
+                            'src': tx.get('src'),  # Source address
+                            'dst': dst
+                        })
+        
+        return transactions
+        
+    except Exception as e:
+        logger.error(f"Error fetching wallet transactions for {wallet_address[:8]}...: {e}")
+        return []
+
+
+async def verify_sol_transaction(signature: str) -> Optional[Dict]:
+    """
+    Verify a specific transaction by signature using Solana RPC.
+    
+    Returns:
+        Transaction details if found and confirmed, None otherwise
+    """
+    try:
+        def fetch_transaction():
+            response = solana_client.get_transaction(
+                signature,
+                encoding="json",
+                commitment=Confirmed,
+                max_supported_transaction_version=0
+            )
+            return response
+        
+        response = await asyncio.to_thread(fetch_transaction)
+        
+        if response and response.value:
+            tx_data = response.value
+            # Check if transaction succeeded
+            if tx_data.transaction.meta and tx_data.transaction.meta.err is None:
+                return {
+                    'signature': signature,
+                    'confirmed': True,
+                    'block_time': tx_data.block_time,
+                    'slot': tx_data.slot
+                }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error verifying transaction {signature}: {e}")
+        return None
+
+
+async def forward_split_payment(
+    payment_id: str,
+    source_signature: str,
+    total_sol_amount: Decimal
+) -> Dict[str, bool]:
+    """
+    Forward payment from middleman wallet to final wallets (20% to W1, 80% to W2).
+    
+    Returns:
+        Dict with success status for each wallet
+    """
+    logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL")
+    
+    # Calculate split amounts (reserve a bit for fees)
+    fee_reserve = Decimal('0.00002')  # Reserve for 2 transaction fees
+    distributable = total_sol_amount - fee_reserve
+    
+    amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+    amount_wallet2 = (distributable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+    
+    logger.info(f"💰 Split: {amount_wallet1} SOL → Wallet1, {amount_wallet2} SOL → Wallet2")
+    
+    results = {'wallet1': False, 'wallet2': False}
+    signatures = {'wallet1': None, 'wallet2': None}
+    
+    try:
+        # Forward to Wallet 1 (20%)
+        try:
+            sig1 = await send_sol_transaction(
+                from_keypair=SOL_MIDDLEMAN_KEYPAIR,
+                to_address=SOL_WALLET1_ADDRESS,
+                amount_sol=amount_wallet1
+            )
+            if sig1:
+                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Wallet1: {sig1}")
+                results['wallet1'] = True
+                signatures['wallet1'] = sig1
+            else:
+                logger.error(f"❌ Failed to forward to Wallet1")
+        except Exception as e:
+            logger.error(f"❌ Error forwarding to Wallet1: {e}")
+        
+        # Small delay between transactions
+        await asyncio.sleep(1)
+        
+        # Forward to Wallet 2 (80%)
+        try:
+            sig2 = await send_sol_transaction(
+                from_keypair=SOL_MIDDLEMAN_KEYPAIR,
+                to_address=SOL_WALLET2_ADDRESS,
+                amount_sol=amount_wallet2
+            )
+            if sig2:
+                logger.info(f"✅ Forwarded {amount_wallet2} SOL to Wallet2: {sig2}")
+                results['wallet2'] = True
+                signatures['wallet2'] = sig2
+            else:
+                logger.error(f"❌ Failed to forward to Wallet2")
+        except Exception as e:
+            logger.error(f"❌ Error forwarding to Wallet2: {e}")
+        
+        # Log the forwarding
+        conn = None
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            
+            c.execute("""
+                INSERT INTO sol_forwarding_log
+                (payment_id, source_signature, wallet1_amount, wallet1_signature, 
+                 wallet2_amount, wallet2_signature, forwarded_at, success)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                payment_id,
+                source_signature,
+                float(amount_wallet1),
+                signatures['wallet1'],
+                float(amount_wallet2),
+                signatures['wallet2'],
+                datetime.now(timezone.utc).isoformat(),
+                1 if all(results.values()) else 0
+            ))
+            
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Database error logging forward: {e}")
+        finally:
+            if conn:
+                conn.close()
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in forward_split_payment: {e}", exc_info=True)
+        return results
+
+
+async def send_sol_transaction(
+    from_keypair: Keypair,
+    to_address: str,
+    amount_sol: Decimal
+) -> Optional[str]:
+    """
+    Send SOL from one address to another.
+    
+    Returns:
+        Transaction signature if successful, None otherwise
+    """
+    try:
+        def send_tx():
+            # Convert SOL to lamports
+            lamports = int(amount_sol * Decimal('1000000000'))
+            
+            # Create transfer instruction
+            transfer_ix = transfer(
+                TransferParams(
+                    from_pubkey=from_keypair.pubkey(),
+                    to_pubkey=Pubkey.from_string(to_address),
+                    lamports=lamports
+                )
+            )
+            
+            # Get recent blockhash
+            blockhash_resp = solana_client.get_latest_blockhash()
+            if not blockhash_resp or not blockhash_resp.value:
+                logger.error("Failed to get recent blockhash")
+                return None
+            
+            recent_blockhash = blockhash_resp.value.blockhash
+            
+            # Create transaction
+            message = Message.new_with_blockhash(
+                [transfer_ix],
+                from_keypair.pubkey(),
+                recent_blockhash
+            )
+            transaction = Transaction([from_keypair], message, recent_blockhash)
+            
+            # Send transaction
+            response = solana_client.send_transaction(
+                transaction,
+                from_keypair,
+                opts={'skip_preflight': False, 'preflight_commitment': Confirmed}
+            )
+            
+            if response and response.value:
+                return str(response.value)
+            
+            return None
+        
+        signature = await asyncio.to_thread(send_tx)
+        
+        if signature:
+            # Wait for confirmation
+            await asyncio.sleep(2)
+            confirmed = await verify_sol_transaction(signature)
+            if confirmed:
+                return signature
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error sending SOL transaction: {e}", exc_info=True)
+        return None
+
+
+async def process_pending_sol_payments(context):
+    """
+    Background task to check for incoming SOL payments.
+    Runs continuously to monitor pending payments.
+    """
+    logger.info("🔍 Starting SOL payment monitoring service...")
+    
+    # Initialize configuration
+    init_sol_config()
+    
+    while True:
+        try:
+            await check_pending_payments(context)
+        except Exception as e:
+            logger.error(f"Error in payment monitoring loop: {e}", exc_info=True)
+        
+        # Wait before next check
+        await asyncio.sleep(SOL_CHECK_INTERVAL)
+
+
+async def check_pending_payments(context):
+    """Check all pending SOL payments for confirmations."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get all pending payments
+        c.execute("""
+            SELECT payment_id, user_id, expected_sol_amount, expected_wallet, 
+                   basket_snapshot, discount_code, created_at, expires_at
+            FROM pending_sol_payments
+            WHERE status = 'pending'
+        """)
+        
+        pending = c.fetchall()
+        
+        if not pending:
+            return
+        
+        logger.debug(f"🔍 Checking {len(pending)} pending SOL payments...")
+        
+        for payment in pending:
+            payment_id = payment['payment_id']
+            user_id = payment['user_id']
+            expected_amount = Decimal(str(payment['expected_sol_amount']))
+            expected_wallet = payment['expected_wallet']
+            expires_at = datetime.fromisoformat(payment['expires_at'])
+            
+            # Check if payment expired
+            if datetime.now(timezone.utc) > expires_at:
+                logger.info(f"⏱️ Payment {payment_id} expired")
+                c.execute("""
+                    UPDATE pending_sol_payments 
+                    SET status = 'expired' 
+                    WHERE payment_id = ?
+                """, (payment_id,))
+                conn.commit()
+                
+                # Unreserve basket items
+                try:
+                    basket_snapshot = json.loads(payment['basket_snapshot'])
+                    from user import _unreserve_basket_items
+                    await asyncio.to_thread(_unreserve_basket_items, basket_snapshot)
+                    logger.info(f"♻️ Unreserved items for expired payment {payment_id}")
+                except Exception as e:
+                    logger.error(f"Error unreserving items: {e}")
+                
+                continue
+            
+            # Get wallet address to check
+            if expected_wallet == 'wallet1':
+                wallet_address = SOL_WALLET1_ADDRESS
+            elif expected_wallet == 'wallet2':
+                wallet_address = SOL_WALLET2_ADDRESS
+            else:  # middleman
+                wallet_address = SOL_MIDDLEMAN_ADDRESS
+            
+            # Check recent transactions to this wallet
+            transactions = await check_wallet_transactions(wallet_address, limit=20)
+            
+            # Look for matching transaction (allow 2% tolerance for price fluctuation)
+            tolerance = expected_amount * Decimal('0.02')
+            
+            for tx in transactions:
+                tx_amount = tx['amount_sol']
+                tx_signature = tx['signature']
+                
+                # Check if transaction matches expected amount (within tolerance)
+                if tx_amount >= (expected_amount - tolerance):
+                    # Check if we already processed this transaction
+                    c.execute("""
+                        SELECT signature FROM processed_sol_transactions 
+                        WHERE signature = ?
+                    """, (tx_signature,))
+                    
+                    if c.fetchone():
+                        logger.debug(f"Transaction {tx_signature} already processed")
+                        continue
+                    
+                    # Verify transaction is confirmed
+                    tx_verified = await verify_sol_transaction(tx_signature)
+                    
+                    if tx_verified and tx_verified.get('confirmed'):
+                        logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
+                        
+                        # Mark transaction as processed first
+                        c.execute("""
+                            INSERT INTO processed_sol_transactions 
+                            (signature, payment_id, processed_at, amount)
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            tx_signature,
+                            payment_id,
+                            datetime.now(timezone.utc).isoformat(),
+                            float(tx_amount)
+                        ))
+                        conn.commit()
+                        
+                        # If payment went to middleman, forward it
+                        if expected_wallet == 'middleman':
+                            logger.info(f"🔄 Payment to middleman, initiating split forward...")
+                            forward_results = await forward_split_payment(
+                                payment_id,
+                                tx_signature,
+                                tx_amount
+                            )
+                            
+                            if not all(forward_results.values()):
+                                logger.error(f"❌ Split forward partially failed: {forward_results}")
+                                # Alert admin
+                                if get_first_primary_admin_id():
+                                    admin_msg = (
+                                        f"⚠️ SPLIT PAYMENT FORWARD FAILED\n"
+                                        f"Payment: {payment_id}\n"
+                                        f"Amount: {tx_amount} SOL\n"
+                                        f"Wallet1: {'✅' if forward_results['wallet1'] else '❌'}\n"
+                                        f"Wallet2: {'✅' if forward_results['wallet2'] else '❌'}\n"
+                                        f"Manual intervention required!"
+                                    )
+                                    try:
+                                        await send_message_with_retry(
+                                            context.bot,
+                                            get_first_primary_admin_id(),
+                                            admin_msg,
+                                            parse_mode=None
+                                        )
+                                    except Exception:
+                                        pass
+                                
+                                # Don't mark payment as confirmed if forward failed
+                                continue
+                        
+                        # Mark payment as confirmed
+                        c.execute("""
+                            UPDATE pending_sol_payments 
+                            SET status = 'confirmed', transaction_signature = ?
+                            WHERE payment_id = ?
+                        """, (tx_signature, payment_id))
+                        conn.commit()
+                        
+                        # Process the purchase
+                        basket_snapshot = json.loads(payment['basket_snapshot'])
+                        discount_code = payment['discount_code']
+                        
+                        await finalize_sol_purchase(
+                            user_id=user_id,
+                            basket_snapshot=basket_snapshot,
+                            discount_code=discount_code,
+                            payment_id=payment_id,
+                            transaction_signature=tx_signature,
+                            context=context
+                        )
+                        
+                        break  # Payment processed, move to next pending payment
+        
+    except sqlite3.Error as e:
+        logger.error(f"Database error checking payments: {e}")
+    except Exception as e:
+        logger.error(f"Error checking pending payments: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+
+
+async def finalize_sol_purchase(user_id, basket_snapshot, discount_code, payment_id, transaction_signature, context):
+    """Finalize purchase after SOL payment confirmed."""
+    logger.info(f"🎉 Finalizing SOL purchase for user {user_id}, payment {payment_id}")
+    
+    # Import here to avoid circular imports
+    from payment import _finalize_purchase
+    
+    # Call the shared finalization logic
+    success = await _finalize_purchase(user_id, basket_snapshot, discount_code, context)
+    
+    if success:
+        logger.info(f"✅ SOL purchase completed successfully for user {user_id}")
+        
+        # Send confirmation to user with transaction link
+        try:
+            lang = context.user_data.get("lang", "en") if hasattr(context, 'user_data') else "en"
+            lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+            
+            tx_link = f"https://solscan.io/tx/{transaction_signature}"
+            msg = f"✅ Payment confirmed!\n\n"
+            msg += f"Transaction: {transaction_signature[:16]}...\n"
+            msg += f"View on Solscan: {tx_link}"
+            
+            await send_message_with_retry(context.bot, user_id, msg, parse_mode=None)
+        except Exception as e:
+            logger.error(f"Error sending confirmation to user: {e}")
+    else:
+        logger.error(f"❌ Failed to finalize SOL purchase for user {user_id}")
+        
+        # Alert admin
+        if get_first_primary_admin_id():
+            admin_msg = (
+                f"⚠️ PURCHASE FINALIZATION FAILED\n"
+                f"Payment: {payment_id}\n"
+                f"User: {user_id}\n"
+                f"TX: {transaction_signature}\n"
+                f"Payment confirmed but purchase processing failed!"
+            )
+            try:
+                await send_message_with_retry(
+                    context.bot,
+                    get_first_primary_admin_id(),
+                    admin_msg,
+                    parse_mode=None
+                )
+            except Exception:
+                pass
+
+
+async def cancel_sol_payment(payment_id: str) -> bool:
+    """Cancel a pending SOL payment and unreserve items."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get payment details
+        c.execute("""
+            SELECT basket_snapshot, status FROM pending_sol_payments
+            WHERE payment_id = ?
+        """, (payment_id,))
+        
+        payment = c.fetchone()
+        
+        if not payment:
+            logger.warning(f"Payment {payment_id} not found for cancellation")
+            return False
+        
+        if payment['status'] != 'pending':
+            logger.warning(f"Payment {payment_id} status is {payment['status']}, cannot cancel")
+            return False
+        
+        # Mark as cancelled
+        c.execute("""
+            UPDATE pending_sol_payments
+            SET status = 'cancelled'
+            WHERE payment_id = ?
+        """, (payment_id,))
+        
+        conn.commit()
+        
+        # Unreserve items
+        try:
+            basket_snapshot = json.loads(payment['basket_snapshot'])
+            from user import _unreserve_basket_items
+            await asyncio.to_thread(_unreserve_basket_items, basket_snapshot)
+            logger.info(f"✅ Cancelled payment {payment_id} and unreserved items")
+            return True
+        except Exception as e:
+            logger.error(f"Error unreserving items during cancellation: {e}")
+            return False
+        
+    except sqlite3.Error as e:
+        logger.error(f"Database error cancelling payment: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+# Export key functions
+__all__ = [
+    'init_sol_config',
+    'get_sol_price_eur',
+    'create_sol_payment',
+    'process_pending_sol_payments',
+    'cancel_sol_payment'
+]
+
