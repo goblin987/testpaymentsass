@@ -683,10 +683,9 @@ async def send_sol_transaction(
             )
             transaction = Transaction([from_keypair], message, recent_blockhash)
             
-            # Send transaction
+            # Send transaction (transaction already signed, don't pass keypair again)
             response = solana_client.send_transaction(
                 transaction,
-                from_keypair,
                 opts={'skip_preflight': False, 'preflight_commitment': Confirmed}
             )
             
@@ -998,18 +997,9 @@ async def finalize_sol_purchase(user_id, basket_snapshot, discount_code, payment
         logger.info(f"✅ SOL purchase completed successfully for user {user_id}")
         
         # Send confirmation to user with transaction link
-        try:
-            lang = context.user_data.get("lang", "en") if hasattr(context, 'user_data') else "en"
-            lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
-            
-            tx_link = f"https://solscan.io/tx/{transaction_signature}"
-            msg = f"✅ Payment confirmed!\n\n"
-            msg += f"Transaction: {transaction_signature[:16]}...\n"
-            msg += f"View on Solscan: {tx_link}"
-            
-            await send_message_with_retry(context.bot, user_id, msg, parse_mode=None)
-        except Exception as e:
-            logger.error(f"Error sending confirmation to user: {e}")
+        # Payment confirmation message removed per user request
+        # Product will be delivered directly without separate confirmation message
+        pass
     else:
         logger.error(f"❌ Failed to finalize SOL purchase for user {user_id}")
         

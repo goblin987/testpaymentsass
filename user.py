@@ -1802,9 +1802,15 @@ async def _create_sol_payment_for_basket(update: Update, context: ContextTypes.D
     msg += f"(~{total_eur:.2f} EUR at {sol_price:.2f} EUR/SOL)\n\n"
     msg += f"📍 Send SOL to this address:\n"
     msg += f"`{wallet_address}`\n\n"
+    
+    # Multilingual exact amount warning
+    msg += f"⚠️ **IMPORTANT / SVARBU / ВАЖНО**\n"
+    msg += f"🇬🇧 Send EXACTLY **{sol_amount:.6f} SOL** (not more, not less)\n"
+    msg += f"🇱🇹 Siųskite TIKSLIAI **{sol_amount:.6f} SOL** (ne daugiau, ne mažiau)\n"
+    msg += f"🇷🇺 Отправьте ТОЧНО **{sol_amount:.6f} SOL** (не больше, не меньше)\n\n"
+    
     msg += f"⏱️ Payment expires in 20 minutes\n\n"
-    msg += f"✅ Payment will be automatically confirmed when transaction is detected on blockchain.\n\n"
-    msg += f"Payment ID: `{payment_id}`"
+    msg += f"✅ Payment will be automatically confirmed when transaction is detected on blockchain."
     
     keyboard = [
         [InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_sol_payment")],
