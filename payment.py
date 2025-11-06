@@ -255,8 +255,13 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
 
     # --- Post-Transaction Cleanup & Message Sending (If DB success) ---
     if db_update_successful:
-        context.user_data['basket'] = []
-        context.user_data.pop('applied_discount', None)
+        # Clear user data (only if context has modifiable user_data - not from background task)
+        try:
+            context.user_data['basket'] = []
+            context.user_data.pop('applied_discount', None)
+        except (TypeError, AttributeError):
+            # Context is from background task (Application object) - user_data is read-only, skip cleanup
+            logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
 
         # Fetch Media BEFORE attempting delivery
         media_details = defaultdict(list)
@@ -550,8 +555,11 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
             logger.critical(f"🚨 CRITICAL: Purchase {user_id} - Database updated but media delivery failed! Manual intervention required!")
             return False # Indicate partial failure
     else: # Purchase failed at DB level
-        context.user_data['basket'] = []
-        context.user_data.pop('applied_discount', None)
+        try:
+            context.user_data['basket'] = []
+            context.user_data.pop('applied_discount', None)
+        except (TypeError, AttributeError):
+            logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
         if chat_id: await send_message_with_retry(context.bot, chat_id, lang_data.get("error_processing_purchase_contact_support", "❌ Error processing purchase."), parse_mode=None)
         return False
 
