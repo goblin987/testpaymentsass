@@ -41,7 +41,8 @@ SOLSCAN_API_URL = None
 SOLSCAN_API_KEY = None
 SOL_CHECK_INTERVAL = 30
 # Use custom RPC URL if provided, otherwise use public endpoint
-SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+# Handle empty strings by using 'or' operator
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
 
 # SOL to EUR conversion rate cache
 sol_price_cache = {'price': Decimal('0'), 'timestamp': 0}
@@ -88,6 +89,12 @@ def init_sol_config():
         logger.warning("⚠️ SOL_MIDDLEMAN_PRIVATE_KEY not set. Split payments will not work!")
     
     # Initialize Solana RPC client
+    # Validate RPC URL format
+    if not SOLANA_RPC_URL.startswith(('http://', 'https://')):
+        logger.error(f"❌ Invalid SOLANA_RPC_URL: '{SOLANA_RPC_URL}' - must start with http:// or https://")
+        logger.warning("Using default RPC URL: https://api.mainnet-beta.solana.com")
+        SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+    
     solana_client = SolanaClient(SOLANA_RPC_URL)
     logger.info(f"✅ Solana client initialized: {SOLANA_RPC_URL}")
 
