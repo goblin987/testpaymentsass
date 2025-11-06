@@ -10,6 +10,7 @@ import time
 import json
 import sqlite3
 import base58
+import os
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
@@ -39,7 +40,8 @@ SOL_MIDDLEMAN_KEYPAIR = None
 SOLSCAN_API_URL = None
 SOLSCAN_API_KEY = None
 SOL_CHECK_INTERVAL = 30
-SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+# Use custom RPC URL if provided, otherwise use public endpoint
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 # SOL to EUR conversion rate cache
 sol_price_cache = {'price': Decimal('0'), 'timestamp': 0}
@@ -279,6 +281,21 @@ async def create_sol_payment(
         return {'error': 'internal_error'}
 
 
+async def retry_rpc_call(func, max_retries=3, base_delay=1.0):
+    """Retry RPC calls with exponential backoff for 429 errors."""
+    for attempt in range(max_retries):
+        try:
+            return await func()
+        except Exception as e:
+            if '429' in str(e) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"⏳ RPC rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(delay)
+            else:
+                raise
+    return None
+
+
 async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> List[Dict]:
     """
     Check recent transactions for a Solana wallet using Solana RPC.
@@ -345,18 +362,23 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
                 continue
             
             try:
-                # Fetch full transaction details
-                def fetch_transaction():
-                    # Convert string signature to Signature object
-                    sig_obj = Signature.from_string(signature)
-                    return solana_client.get_transaction(
-                        sig_obj,
-                        encoding="jsonParsed",
-                        commitment=Confirmed,
-                        max_supported_transaction_version=0
-                    )
+                # Fetch full transaction details with retry logic
+                async def fetch_transaction_with_retry():
+                    def fetch_transaction():
+                        # Convert string signature to Signature object
+                        sig_obj = Signature.from_string(signature)
+                        return solana_client.get_transaction(
+                            sig_obj,
+                            encoding="jsonParsed",
+                            commitment=Confirmed,
+                            max_supported_transaction_version=0
+                        )
+                    return await asyncio.to_thread(fetch_transaction)
                 
-                tx_response = await asyncio.to_thread(fetch_transaction)
+                tx_response = await retry_rpc_call(fetch_transaction_with_retry)
+                
+                # Add small delay to avoid RPC rate limits
+                await asyncio.sleep(0.1)  # 100ms delay between requests
                 
                 if not tx_response or not tx_response.value:
                     if verbose:
