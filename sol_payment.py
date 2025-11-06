@@ -235,6 +235,8 @@ async def create_sol_payment(
         
         # Determine which wallet should receive payment
         target_wallet = determine_payment_wallet(basket_snapshot)
+        logger.info(f"💳 Determined payment destination for user {user_id}: {target_wallet}")
+        logger.debug(f"Basket payout_wallet values: {[item.get('payout_wallet', 'N/A') for item in basket_snapshot]}")
         
         # Generate unique payment ID
         payment_id = f"SOL_{user_id}_{int(time.time())}_{hex(int(time.time() * 1000000))[-6:]}"

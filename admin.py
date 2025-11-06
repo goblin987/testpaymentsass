@@ -212,12 +212,16 @@ async def _prepare_and_confirm_drop(
              media_list_for_db = []
              if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None
 
+    # Get wallet choice (should be set before this point)
+    wallet_choice = user_data.get("admin_wallet_choice", "wallet1")
+    
     user_data["pending_drop"] = {
         "city": user_data["admin_city"], "district": user_data["admin_district"],
         "product_type": user_data["admin_product_type"], "size": user_data["pending_drop_size"],
         "price": user_data["pending_drop_price"], "original_text": text,
         "media": media_list_for_db,
-        "temp_dir": temp_dir
+        "temp_dir": temp_dir,
+        "payout_wallet": wallet_choice  # Include wallet choice in pending_drop
     }
     user_data.pop("state", None)
 
@@ -879,6 +883,7 @@ async def handle_adm_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     # Store wallet selection
     context.user_data["admin_wallet_choice"] = wallet_choice
+    logger.info(f"Admin {query.from_user.id} selected wallet: {wallet_choice}")
     
     # Show wallet selection confirmation and ask for price
     wallet_display = {
@@ -921,6 +926,7 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
     city = pending_drop.get("city"); district = pending_drop.get("district"); p_type = pending_drop.get("product_type")
     size = pending_drop.get("size"); price = pending_drop.get("price"); original_text = pending_drop.get("original_text", "")
     media_list = pending_drop.get("media", []); temp_dir = pending_drop.get("temp_dir")
+    wallet_choice = pending_drop.get("payout_wallet", "wallet1")  # Get wallet choice from pending_drop
 
     if not all([city, district, p_type, size, price is not None]):
         logger.error(f"Missing data in pending_drop for user {user_id}: {pending_drop}")
@@ -928,11 +934,9 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
         keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price", "admin_city_id", "admin_district_id", "admin_product_type", "admin_city", "admin_district"]
         for key in keys_to_clear: user_specific_data.pop(key, None)
         return await query.edit_message_text("❌ Error: Incomplete drop data. Please start again.", parse_mode=None)
-
-    # Get wallet choice (default to wallet1 if not set)
-    wallet_choice = user_specific_data.get("admin_wallet_choice", "wallet1")
     
     product_name = f"{p_type} {size} {int(time.time())}"; conn = None; product_id = None
+    logger.info(f"Creating product with payout_wallet: {wallet_choice}")
     try:
         conn = get_db_connection(); c = conn.cursor(); c.execute("BEGIN")
         insert_params = (
