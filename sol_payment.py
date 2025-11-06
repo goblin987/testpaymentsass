@@ -613,26 +613,8 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     signatures = {'wallet1': None, 'wallet2': None}
     
     try:
-        # Forward to Asmenine (20%)
-        try:
-            sig1 = await send_sol_transaction(
-                from_keypair=SOL_MIDDLEMAN_KEYPAIR,
-                to_address=SOL_WALLET1_ADDRESS,
-                amount_sol=amount_wallet1
-            )
-            if sig1:
-                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Asmenine (wallet1): {sig1}")
-                results['wallet1'] = True
-                signatures['wallet1'] = sig1
-            else:
-                logger.error(f"❌ Failed to forward to Asmenine (wallet1)")
-        except Exception as e:
-            logger.error(f"❌ Error forwarding to Asmenine (wallet1): {e}")
-        
-        # Small delay between transactions
-        await asyncio.sleep(1)
-        
-        # Forward to Kolegos (80%)
+        # IMPORTANT: Forward to Kolegos (80%) FIRST - larger amount more likely to fail
+        # If 80% fails, we don't send the 20%, preventing partial splits
         try:
             sig2 = await send_sol_transaction(
                 from_keypair=SOL_MIDDLEMAN_KEYPAIR,
@@ -644,9 +626,32 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
                 results['wallet2'] = True
                 signatures['wallet2'] = sig2
             else:
-                logger.error(f"❌ Failed to forward to Kolegos (wallet2)")
+                logger.error(f"❌ Failed to forward to Kolegos (wallet2) - no signature returned")
+                # Don't proceed to wallet1 if wallet2 failed
+                return results
         except Exception as e:
-            logger.error(f"❌ Error forwarding to Kolegos (wallet2): {e}")
+            logger.error(f"❌ Failed to forward to Kolegos (wallet2): {e}", exc_info=True)
+            # Don't proceed to wallet1 if wallet2 failed
+            return results
+        
+        # Small delay between transactions
+        await asyncio.sleep(1)
+        
+        # Forward to Asmenine (20%) - only if Kolegos succeeded
+        try:
+            sig1 = await send_sol_transaction(
+                from_keypair=SOL_MIDDLEMAN_KEYPAIR,
+                to_address=SOL_WALLET1_ADDRESS,
+                amount_sol=amount_wallet1
+            )
+            if sig1:
+                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Asmenine (wallet1): {sig1}")
+                results['wallet1'] = True
+                signatures['wallet1'] = sig1
+            else:
+                logger.error(f"❌ Failed to forward to Asmenine (wallet1) - no signature returned")
+        except Exception as e:
+            logger.error(f"❌ Failed to forward to Asmenine (wallet1): {e}", exc_info=True)
         
         # Log the forwarding
         conn = None
@@ -940,27 +945,7 @@ async def check_pending_payments(context):
                             
                             if not forward_success:
                                 logger.error(f"❌ Split forward failed: {forward_results}")
-                                # Alert admin
-                                if get_first_primary_admin_id():
-                                    admin_msg = (
-                                        f"⚠️ SPLIT PAYMENT FORWARD FAILED\n"
-                                        f"Payment: {payment_id}\n"
-                                        f"TX: {tx_signature}\n"
-                                        f"Amount: {tx_amount} SOL\n"
-                                        f"Asmenine (wallet1): {'✅' if forward_results.get('wallet1') else '❌'}\n"
-                                        f"Kolegos (wallet2): {'✅' if forward_results.get('wallet2') else '❌'}\n"
-                                        f"Manual intervention required!"
-                                    )
-                                    try:
-                                        await send_message_with_retry(
-                                            context.bot,
-                                            get_first_primary_admin_id(),
-                                            admin_msg,
-                                            parse_mode=None
-                                        )
-                                    except Exception:
-                                        pass
-                                # Don't process payment if forward failed
+                                # Don't process payment if forward failed (logged for debugging)
                                 continue
                             
                             # Restart atomic transaction after successful forwarding

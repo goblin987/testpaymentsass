@@ -230,6 +230,7 @@ def callback_query_router(func):
                 "adm_city": admin.handle_adm_city, "adm_dist": admin.handle_adm_dist, "adm_type": admin.handle_adm_type,
                 "adm_add": admin.handle_adm_add, "adm_size": admin.handle_adm_size, "adm_custom_size": admin.handle_adm_custom_size,
                 "adm_wallet": admin.handle_adm_wallet,
+                "adm_bulk_wallet": admin.handle_adm_bulk_wallet,
                 "confirm_add_drop": admin.handle_confirm_add_drop, "cancel_add": admin.cancel_add,
                 "adm_manage_cities": admin.handle_adm_manage_cities, "adm_add_city": admin.handle_adm_add_city,
                 "adm_edit_city": admin.handle_adm_edit_city, "adm_delete_city": admin.handle_adm_delete_city,

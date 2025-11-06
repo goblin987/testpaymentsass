@@ -1181,23 +1181,62 @@ async def handle_adm_bulk_price_message(update: Update, context: ContextTypes.DE
     if price > 999999: return await send_message_with_retry(context.bot, chat_id, "❌ Price too high (max 999999).", parse_mode=None)
 
     context.user_data["bulk_pending_drop_price"] = price
+    context.user_data["state"] = "awaiting_bulk_wallet"
+    
+    # Show wallet selection before proceeding to messages
+    msg = "💳 Select payout wallet:\n\nWhere should payments go for these products?"
+    keyboard = [
+        [InlineKeyboardButton("💳 Asmenine (100%)", callback_data="adm_bulk_wallet:wallet1")],
+        [InlineKeyboardButton("💳 Kolegos (100%)", callback_data="adm_bulk_wallet:wallet2")],
+        [InlineKeyboardButton("💳 Split (20% Asmenine / 80% Kolegos)", callback_data="adm_bulk_wallet:split")]
+    ]
+    await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    return  # Exit here, wallet handler will continue the flow
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Finish & Create Products", callback_data="adm_bulk_create_all")],
+        [InlineKeyboardButton("❌ Cancel Bulk Operation", callback_data="cancel_bulk_add")]
+    ]
+    
+    await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+async def handle_adm_bulk_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Handles bulk wallet selection."""
+    query = update.callback_query
+    if not is_primary_admin(query.from_user.id): return await query.answer("Access denied.", show_alert=True)
+    
+    chat_id = query.message.chat_id
+    if context.user_data.get("state") != "awaiting_bulk_wallet":
+        return await query.answer("Invalid state. Please restart.", show_alert=True)
+    
+    # Extract wallet choice from callback data (format: adm_bulk_wallet:wallet1)
+    wallet_choice = params[0] if params else "wallet1"
+    context.user_data["admin_wallet_choice"] = wallet_choice
     context.user_data["state"] = "awaiting_bulk_messages"
     
     # Initialize bulk messages collection
     context.user_data["bulk_messages"] = []
     
-    price_str = format_currency(price)
+    # Show wallet confirmation and proceed to message collection
+    price_str = format_currency(context.user_data.get("bulk_pending_drop_price", 0))
     size = context.user_data.get("bulk_pending_drop_size", "")
     p_type = context.user_data.get("bulk_admin_product_type", "")
     city = context.user_data.get("bulk_admin_city", "")
     district = context.user_data.get("bulk_admin_district", "")
     type_emoji = PRODUCT_TYPES.get(p_type, DEFAULT_PRODUCT_EMOJI)
     
+    wallet_display = {
+        "wallet1": "💳 Asmenine (100%)",
+        "wallet2": "💳 Kolegos (100%)",
+        "split": "💳 Split (20% Asmenine / 80% Kolegos)"
+    }.get(wallet_choice, wallet_choice)
+    
     msg = (f"📦 Bulk Products Setup Complete\n\n"
            f"📍 Location: {city} / {district}\n"
            f"{type_emoji} Type: {p_type}\n"
            f"📏 Size: {size}\n"
-           f"💰 Price: {price_str}€\n\n"
+           f"💰 Price: {price_str}€\n"
+           f"{wallet_display}\n\n"
            f"Now forward or send up to 10 different messages. Each message can contain:\n"
            f"• Photos, videos, GIFs\n"
            f"• Text descriptions\n"
@@ -1210,7 +1249,7 @@ async def handle_adm_bulk_price_message(update: Update, context: ContextTypes.DE
         [InlineKeyboardButton("❌ Cancel Bulk Operation", callback_data="cancel_bulk_add")]
     ]
     
-    await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 async def handle_adm_bulk_drop_details_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles collecting multiple different messages for bulk products."""
