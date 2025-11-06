@@ -267,8 +267,8 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
             if SOLSCAN_API_KEY:
                 headers['token'] = SOLSCAN_API_KEY
             
-            # Get recent SOL transfers to this wallet
-            url = f"{SOLSCAN_API_URL}/account/soltransfer"
+            # Get recent SOL transfers to this wallet (using correct endpoint with capital T)
+            url = f"{SOLSCAN_API_URL}/account/solTransfers"
             params = {
                 'account': wallet_address,
                 'limit': limit
@@ -281,25 +281,27 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         data = await asyncio.to_thread(fetch_transactions)
         
         # Extract incoming transfer information
+        # Solscan API returns array directly for free tier
         transactions = []
-        if isinstance(data, dict) and 'data' in data:
-            for tx in data['data']:
-                # Only process incoming transfers (where our wallet is the destination)
-                dst = tx.get('dst')
-                if dst and dst.lower() == wallet_address.lower():
-                    signature = tx.get('txHash')
-                    block_time = tx.get('blockTime')
-                    lamports = tx.get('lamport', 0)
-                    
-                    if signature and lamports:
-                        sol_amount = Decimal(lamports) / Decimal('1000000000')  # Convert lamports to SOL
-                        transactions.append({
-                            'signature': signature,
-                            'timestamp': block_time,
-                            'amount_sol': sol_amount,
-                            'src': tx.get('src'),  # Source address
-                            'dst': dst
-                        })
+        data_list = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
+        
+        for tx in data_list:
+            # Only process incoming transfers (where our wallet is the destination)
+            dst = tx.get('dst')
+            if dst and dst.lower() == wallet_address.lower():
+                signature = tx.get('txHash')
+                block_time = tx.get('blockTime')
+                lamports = tx.get('lamport', 0)
+                
+                if signature and lamports:
+                    sol_amount = Decimal(lamports) / Decimal('1000000000')  # Convert lamports to SOL
+                    transactions.append({
+                        'signature': signature,
+                        'timestamp': block_time,
+                        'amount_sol': sol_amount,
+                        'src': tx.get('src'),  # Source address
+                        'dst': dst
+                    })
         
         return transactions
         
