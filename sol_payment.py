@@ -1305,26 +1305,32 @@ async def check_pending_payments(context):
                     
                     # Now start NEW atomic transaction for final confirmation
                     logger.info(f"  💾 [CONFIRM] Starting final confirmation transaction...")
+                    confirm_conn = None
                     try:
-                        logger.debug(f"     BEGIN IMMEDIATE on main connection")
-                        c.execute("BEGIN IMMEDIATE")
+                        # Open NEW connection for confirmation
+                        confirm_conn = get_db_connection()
+                        confirm_conn.execute("PRAGMA busy_timeout = 10000")
+                        confirm_c = confirm_conn.cursor()
+                        
+                        logger.debug(f"     BEGIN IMMEDIATE on confirmation connection")
+                        confirm_c.execute("BEGIN IMMEDIATE")
                         
                         # Final check if transaction was processed during forward
                         logger.debug(f"     Triple-checking TX not processed...")
-                        c.execute("""
+                        confirm_c.execute("""
                             SELECT signature FROM processed_sol_transactions 
                             WHERE signature = ?
                         """, (tx_signature,))
                         
-                        if c.fetchone():
+                        if confirm_c.fetchone():
                             logger.warning(f"  ⚠️ [CONFIRM] TX {tx_signature[:16]}... was processed during forwarding, rolling back")
-                            c.execute("ROLLBACK")
+                            confirm_conn.rollback()
                             continue
                         logger.debug(f"     ✅ TX still unprocessed")
                         
                         # Mark transaction as processed (atomic with payment confirmation)
                         logger.debug(f"     Inserting into processed_sol_transactions...")
-                        c.execute("""
+                        confirm_c.execute("""
                             INSERT INTO processed_sol_transactions 
                             (signature, payment_id, processed_at, amount)
                             VALUES (?, ?, ?, ?)
@@ -1338,7 +1344,7 @@ async def check_pending_payments(context):
                         
                         # Mark payment as confirmed
                         logger.debug(f"     Updating payment status to 'confirmed'...")
-                        c.execute("""
+                        confirm_c.execute("""
                             UPDATE pending_sol_payments 
                             SET status = 'confirmed', transaction_signature = ?
                             WHERE payment_id = ?
@@ -1347,16 +1353,23 @@ async def check_pending_payments(context):
                         
                         # Commit atomic transaction
                         logger.debug(f"     Committing final confirmation...")
-                        conn.commit()
+                        confirm_conn.commit()
                         logger.info(f"  ✅ [CONFIRM] Payment {payment_id} and TX {tx_signature[:16]}... ATOMICALLY confirmed")
                         
                     except Exception as atomic_error:
                         logger.error(f"Error in atomic transaction processing: {atomic_error}")
-                        try:
-                            c.execute("ROLLBACK")
-                        except:
-                            pass
+                        if confirm_conn:
+                            try:
+                                confirm_conn.rollback()
+                            except:
+                                pass
                         continue
+                    finally:
+                        if confirm_conn:
+                            try:
+                                confirm_conn.close()
+                            except:
+                                pass
                     
                     # Process the purchase (outside atomic transaction)
                     basket_snapshot = json.loads(payment['basket_snapshot'])
