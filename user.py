@@ -2631,6 +2631,12 @@ async def handle_skip_discount_single_pay(update: Update, context: ContextTypes.
             return await handle_shop(update, context)
 
     context.user_data['single_item_pay_discount_code'] = None # Ensure no discount code is carried forward
+    
+    # Copy single_item context to basket_pay context for SOL payment function
+    context.user_data['basket_pay_snapshot'] = context.user_data.get('single_item_pay_snapshot')
+    context.user_data['basket_pay_total_eur'] = context.user_data.get('single_item_pay_final_eur')
+    context.user_data['basket_pay_discount_code'] = None
+    
     proceeding_msg = lang_data.get("proceeding_to_payment_answer", "Proceeding to payment options...")
     await query.answer(proceeding_msg)
     await _create_sol_payment_for_basket(update, context)
