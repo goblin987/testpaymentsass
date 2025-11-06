@@ -105,7 +105,23 @@ class TestPaymentSystem:
         with patch('utils.DATABASE_PATH', TEST_DB):
             init_db()
         
+        # Create test users (to avoid foreign key constraint errors)
+        conn = sqlite3.connect(TEST_DB)
+        c = conn.cursor()
+        
+        # Insert test user and additional users for concurrent tests
+        for i in range(10):
+            user_id = TEST_USER_ID + i
+            c.execute("""
+                INSERT OR IGNORE INTO users (user_id, balance, total_purchases, language)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, 0.0, 0, 'en'))
+        
+        conn.commit()
+        conn.close()
+        
         print_success("Test database initialized")
+        print_info(f"Created {10} test users (IDs: {TEST_USER_ID} - {TEST_USER_ID + 9})")
     
     def create_test_product(self, payout_wallet: str = 'wallet1', price: float = 10.0) -> int:
         """Create a test product in the database."""
