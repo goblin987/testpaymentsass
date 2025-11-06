@@ -32,7 +32,6 @@ from utils import (
     TOKEN, ADMIN_ID, init_db, load_all_data, LANGUAGES, THEMES,
     SUPPORT_USERNAME, BASKET_TIMEOUT, clear_all_expired_baskets,
     SECONDARY_ADMIN_IDS, WEBHOOK_URL,
-    NOWPAYMENTS_IPN_SECRET,
     get_db_connection,
     DATABASE_PATH,
     get_pending_deposit, remove_pending_deposit, FEE_ADJUSTMENT,
@@ -222,10 +221,8 @@ def callback_query_router(func):
                 "apply_discount_single_pay": user.handle_apply_discount_single_pay,
                 "skip_discount_single_pay": user.handle_skip_discount_single_pay,
 
-                # Payment Handlers (from payment.py)
-                "select_basket_crypto": payment.handle_select_basket_crypto,
-                "cancel_crypto_payment": payment.handle_cancel_crypto_payment,
-                "select_refill_crypto": payment.handle_select_refill_crypto,
+                # Payment Handlers (SOL payments)
+                "cancel_sol_payment": user.handle_cancel_sol_payment,
 
                 # Primary Admin Handlers (from admin.py)
                 "admin_menu": admin.handle_admin_menu,
@@ -233,6 +230,7 @@ def callback_query_router(func):
                 "sales_select_period": admin.handle_sales_select_period, "sales_run": admin.handle_sales_run,
                 "adm_city": admin.handle_adm_city, "adm_dist": admin.handle_adm_dist, "adm_type": admin.handle_adm_type,
                 "adm_add": admin.handle_adm_add, "adm_size": admin.handle_adm_size, "adm_custom_size": admin.handle_adm_custom_size,
+                "adm_wallet": admin.handle_adm_wallet,
                 "confirm_add_drop": admin.handle_confirm_add_drop, "cancel_add": admin.cancel_add,
                 "adm_manage_cities": admin.handle_adm_manage_cities, "adm_add_city": admin.handle_adm_add_city,
                 "adm_edit_city": admin.handle_adm_edit_city, "adm_delete_city": admin.handle_adm_delete_city,
@@ -672,19 +670,7 @@ async def retry_purchase_finalization(user_id: int, basket_snapshot: list, disco
 
 
 # --- Flask Webhook Routes ---
-def verify_nowpayments_signature(request_data_bytes, signature_header, secret_key):
-    if not secret_key or not signature_header:
-        logger.warning("IPN Secret Key or signature header missing. Cannot verify webhook.")
-        return False
-    try:
-        # Ensure request_data_bytes is used directly if it's already the raw body
-        # If you need to re-order, parse then re-serialize
-        ordered_data = json.dumps(json.loads(request_data_bytes), sort_keys=True, separators=(',', ':'))
-        hmac_hash = hmac.new(secret_key.encode('utf-8'), ordered_data.encode('utf-8'), hashlib.sha512).hexdigest()
-        return hmac.compare_digest(hmac_hash, signature_header)
-    except Exception as e:
-        logger.error(f"Error during signature verification: {e}", exc_info=True)
-        return False
+# NowPayments webhook removed - using direct Solana payments now
 
 # --- Improved Payment Processing with Retry ---
 async def process_payment_with_retry(user_id: int, basket_snapshot: list, discount_code_used: str | None, payment_id: str, context: ContextTypes.DEFAULT_TYPE, max_retries: int = 3):
@@ -736,402 +722,7 @@ async def process_payment_with_retry(user_id: int, basket_snapshot: list, discou
     
     return False
 
-@flask_app.route("/webhook", methods=['POST'])
-def nowpayments_webhook():
-    global telegram_app, main_loop, NOWPAYMENTS_IPN_SECRET
-    
-    # CRITICAL: Log every webhook attempt
-    logger.info("🔍 WEBHOOK RECEIVED: NOWPayments webhook endpoint accessed")
-    logger.info(f"🔍 WEBHOOK DEBUG: Request method: {request.method}")
-    logger.info(f"🔍 WEBHOOK DEBUG: Request headers: {dict(request.headers)}")
-    logger.info(f"🔍 WEBHOOK DEBUG: Content length: {request.content_length}")
-    logger.info(f"🔍 WEBHOOK DEBUG: Remote address: {request.remote_addr}")
-    
-    if not telegram_app or not main_loop:
-        logger.error("Webhook received but Telegram app or event loop not initialized.")
-        return Response(status=503)
-
-    # Check request size limit
-    content_length = request.content_length
-    if content_length and content_length > 10240:  # 10KB limit
-        logger.warning(f"Webhook request too large: {content_length} bytes")
-        return Response("Request too large", status=413)
-
-    raw_body = request.get_data() # Get raw body once
-    signature = request.headers.get('x-nowpayments-sig')
-
-    # BULLETPROOF: MANDATORY signature verification for security and reliability
-    if not NOWPAYMENTS_IPN_SECRET:
-        logger.critical("❌ CRITICAL SECURITY ERROR: NOWPAYMENTS_IPN_SECRET not configured! Rejecting all webhooks for security.")
-        return Response("IPN Secret not configured", status=500)
-    
-    if not signature:
-        logger.warning("❌ SECURITY REJECTION: No signature header received from webhook. Rejecting for security.")
-        return Response("Missing signature header", status=400)
-    
-    if not verify_nowpayments_signature(raw_body, signature, NOWPAYMENTS_IPN_SECRET):
-        logger.warning("❌ SECURITY REJECTION: NOWPayments signature verification FAILED - webhook is fake or corrupted")
-        return Response("Invalid signature", status=400)
-    
-    logger.info("✅ NOWPayments signature verification PASSED - webhook is authentic")
-
-    logger.info(f"NOWPayments IPN Received (signature verification {'PASSED' if NOWPAYMENTS_IPN_SECRET and signature else 'SKIPPED'})")
-    
-    # Add webhook debugging
-    logger.info(f"🔍 WEBHOOK DEBUG: Raw body length: {len(raw_body)} bytes")
-    logger.info(f"🔍 WEBHOOK DEBUG: Signature header: {signature}")
-    logger.info(f"🔍 WEBHOOK DEBUG: IPN Secret configured: {bool(NOWPAYMENTS_IPN_SECRET)}")
-    logger.info(f"🔍 WEBHOOK DEBUG: Webhook URL: {WEBHOOK_URL}/webhook")
-
-
-    try:
-        data = json.loads(raw_body) # Parse JSON from raw body
-    except json.JSONDecodeError:
-        logger.warning("Webhook received non-JSON request.")
-        return Response("Invalid Request: Not JSON", status=400)
-
-    logger.info(f"NOWPayments IPN Data: {json.dumps(data)}") # Log the parsed data
-
-    required_keys = ['payment_id', 'payment_status', 'pay_currency', 'actually_paid']
-    if not all(key in data for key in required_keys):
-        logger.error(f"Webhook missing required keys. Data: {data}")
-        return Response("Missing required keys", status=400)
-
-    payment_id = data.get('payment_id')
-    status = data.get('payment_status')
-    pay_currency = data.get('pay_currency')
-    actually_paid_str = data.get('actually_paid')
-    parent_payment_id = data.get('parent_payment_id')
-    order_id = data.get('order_id')
-    # BULLETPROOF FIX: Check for outcome_amount (EUR equivalent calculated by NOWPayments)
-    outcome_amount_str = data.get('outcome_amount')  # NOWPayments' calculated EUR value
-    outcome_currency = data.get('outcome_currency')  # Should be 'eur' for EUR payments
-    
-    logger.info(f"🔍 WEBHOOK DATA: payment_id={payment_id}, status={status}, actually_paid={actually_paid_str} {pay_currency}, outcome_amount={outcome_amount_str} {outcome_currency}")
-
-    if parent_payment_id:
-         logger.info(f"Ignoring child payment webhook update {payment_id} (parent: {parent_payment_id}).")
-         return Response("Child payment ignored", status=200)
-
-    if status in ['finished', 'confirmed', 'partially_paid'] and actually_paid_str is not None:
-        logger.info(f"🚀 BULLETPROOF: Processing '{status}' payment: {payment_id}")
-        logger.info(f"📊 BULLETPROOF: Payment details - Amount: {actually_paid_str} {pay_currency}, Order: {order_id}")
-        
-        # CRITICAL: Check if payment was already processed to prevent duplicate processing
-        try:
-            existing_pending = asyncio.run_coroutine_threadsafe(
-                asyncio.to_thread(get_pending_deposit, payment_id), main_loop
-            ).result(timeout=5)
-            
-            if not existing_pending:
-                logger.warning(f"⚠️ Payment {payment_id} with status '{status}' already processed or not found. Skipping to prevent duplicate processing.")
-                return Response("Payment already processed", status=200)
-        except Exception as check_e:
-            logger.error(f"❌ Error checking existing payment {payment_id}: {check_e}")
-            # Continue processing if check fails
-        
-        try:
-            actually_paid_decimal = Decimal(str(actually_paid_str))
-            if actually_paid_decimal <= 0:
-                logger.warning(f"⚠️ Ignoring webhook for payment {payment_id} with zero 'actually_paid'.")
-                if status != 'confirmed': # Only remove if not yet confirmed, might be a final "zero paid" update after other partials
-                    asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="zero_paid"), main_loop)
-                return Response("Zero amount paid", status=200)
-
-            # BULLETPROOF: Get pending info with timeout and retry
-            pending_info = None
-            for attempt in range(3):  # 3 attempts with exponential backoff
-                try:
-                    pending_info = asyncio.run_coroutine_threadsafe(
-                        asyncio.to_thread(get_pending_deposit, payment_id), main_loop
-                    ).result(timeout=10)  # 10 second timeout
-                    break
-                except asyncio.TimeoutError:
-                    logger.warning(f"⏰ Timeout getting pending info for {payment_id}, attempt {attempt + 1}/3")
-                    if attempt < 2:  # Don't sleep on last attempt
-                        time.sleep(1 * (attempt + 1))  # Exponential backoff
-                except Exception as e:
-                    logger.error(f"❌ Error getting pending info for {payment_id}, attempt {attempt + 1}/3: {e}")
-                    if attempt < 2:
-                        time.sleep(1 * (attempt + 1))
-
-            if not pending_info:
-                 logger.info(f"ℹ️ Webhook Info: Pending deposit {payment_id} not found (likely already processed).")
-                 return Response("Pending deposit not found", status=200)
-
-            user_id = pending_info['user_id']
-            stored_currency = pending_info['currency']
-            target_eur_decimal = Decimal(str(pending_info['target_eur_amount']))
-            expected_crypto_decimal = Decimal(str(pending_info.get('expected_crypto_amount', '0.0')))
-            is_purchase = pending_info.get('is_purchase') == 1
-            basket_snapshot = pending_info.get('basket_snapshot')
-            discount_code_used = pending_info.get('discount_code_used')
-            log_prefix = "PURCHASE" if is_purchase else "REFILL"
-
-            if stored_currency.lower() != pay_currency.lower():
-                 logger.error(f"Currency mismatch {log_prefix} {payment_id}. DB: {stored_currency}, Webhook: {pay_currency}")
-                 asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="currency_mismatch"), main_loop)
-                 return Response("Currency mismatch", status=400)
-
-            paid_eur_equivalent = Decimal('0.0')
-            
-            # BULLETPROOF FIX: Use NOWPayments' outcome_amount if available (most reliable)
-            # This is the EUR value that NOWPayments calculated using their exchange rate
-            if outcome_amount_str and outcome_currency and outcome_currency.lower() == 'eur':
-                try:
-                    paid_eur_equivalent = Decimal(str(outcome_amount_str)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    logger.info(f"✅ {log_prefix} {payment_id}: Using NOWPayments' calculated EUR value: {paid_eur_equivalent:.2f} EUR (from outcome_amount)")
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"⚠️ {log_prefix} {payment_id}: Could not parse outcome_amount '{outcome_amount_str}'. Error: {e}. Falling back to calculation.")
-                    outcome_amount_str = None  # Force fallback
-            
-            # Fallback: Calculate EUR equivalent ourselves if NOWPayments doesn't provide it
-            if paid_eur_equivalent == Decimal('0.0'):
-                try:
-                    crypto_price_future = asyncio.run_coroutine_threadsafe(
-                        asyncio.to_thread(get_crypto_price_eur, pay_currency), main_loop
-                    )
-                    crypto_price_eur = crypto_price_future.result(timeout=10)
-                    
-                    if crypto_price_eur and crypto_price_eur > Decimal('0.0'):
-                        paid_eur_equivalent = (actually_paid_decimal * crypto_price_eur).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        logger.info(f"💶 {log_prefix} {payment_id}: Calculated EUR using real-time price {crypto_price_eur} EUR/{pay_currency.upper()}: {paid_eur_equivalent:.2f} EUR")
-                    else:
-                        logger.warning(f"{log_prefix} {payment_id}: Could not get real-time price for {pay_currency}. Falling back to proportion method.")
-                        # Fallback to proportion method if price fetch fails
-                        if expected_crypto_decimal > Decimal('0.0'):
-                            proportion = actually_paid_decimal / expected_crypto_decimal
-                            paid_eur_equivalent = (proportion * target_eur_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                            logger.info(f"💶 {log_prefix} {payment_id}: Calculated EUR using proportion method: {paid_eur_equivalent:.2f} EUR")
-                        else:
-                            logger.error(f"{log_prefix} {payment_id}: Cannot calculate EUR equivalent (expected crypto amount is zero).")
-                            asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="zero_expected_crypto"), main_loop)
-                            return Response("Cannot calculate EUR equivalent", status=400)
-                except Exception as price_e:
-                    logger.error(f"{log_prefix} {payment_id}: Error getting crypto price: {price_e}. Using proportion fallback.")
-                    # Fallback to proportion method if price API fails
-                    if expected_crypto_decimal > Decimal('0.0'):
-                        proportion = actually_paid_decimal / expected_crypto_decimal
-                        paid_eur_equivalent = (proportion * target_eur_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        logger.info(f"💶 {log_prefix} {payment_id}: Calculated EUR using proportion fallback: {paid_eur_equivalent:.2f} EUR")
-                    else:
-                        logger.error(f"{log_prefix} {payment_id}: Cannot calculate EUR equivalent (expected crypto amount is zero).")
-                        asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="zero_expected_crypto"), main_loop)
-                        return Response("Cannot calculate EUR equivalent", status=400)
-
-            logger.info(f"{log_prefix} {payment_id}: User {user_id} paid {actually_paid_decimal} {pay_currency}. Approx EUR value: {paid_eur_equivalent:.2f}. Target EUR: {target_eur_decimal:.2f}")
-
-            dummy_context = ContextTypes.DEFAULT_TYPE(application=telegram_app, chat_id=user_id, user_id=user_id) if telegram_app else None
-            if not dummy_context:
-                logger.error(f"Cannot process {log_prefix} {payment_id}, telegram_app not ready.")
-                return Response("Internal error: App not ready", status=503)
-
-            if is_purchase:
-                # BULLETPROOF FIX: Compare crypto amounts directly to avoid exchange rate fluctuation issues
-                # If user paid the exact crypto amount shown on invoice, accept it even if EUR equivalent differs slightly
-                crypto_payment_ratio = (actually_paid_decimal / expected_crypto_decimal) if expected_crypto_decimal > Decimal('0.0') else Decimal('0.0')
-                
-                # TOLERANCE: Allow up to 2% underpayment OR 0.50 EUR tolerance to account for exchange rate fluctuations
-                # This prevents false rejections when users pay the EXACT crypto amount shown on invoice
-                tolerance_percent = Decimal('0.02')  # 2%
-                tolerance_fixed_eur = Decimal('0.50')  # 50 cents
-                eur_difference = target_eur_decimal - paid_eur_equivalent
-                
-                # Calculate if payment is acceptable:
-                # 1. Crypto amount is at least 98% of expected (allows small network fees)
-                # 2. OR EUR difference is less than 50 cents (exchange rate fluctuation tolerance)
-                is_acceptable_payment = (crypto_payment_ratio >= (Decimal('1.0') - tolerance_percent)) or (eur_difference <= tolerance_fixed_eur)
-                
-                if is_acceptable_payment:
-                    if abs(eur_difference) <= Decimal('0.01'):
-                        logger.info(f"💳 EXACT PAYMENT: User {user_id} paid exactly {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product (diff: {eur_difference:.2f} EUR)")
-                    elif eur_difference > Decimal('0.01'):
-                        logger.info(f"💳 PAYMENT ACCEPTED WITH TOLERANCE: User {user_id} paid {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product (short by {eur_difference:.2f} EUR, within tolerance)")
-                    else:
-                        logger.info(f"💳 OVERPAYMENT: User {user_id} paid {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product (overpaid by {abs(eur_difference):.2f} EUR)")
-                else:
-                    logger.warning(f"💳 PAYMENT REJECTED: Crypto ratio: {crypto_payment_ratio:.4f} (need ≥98%), EUR diff: {eur_difference:.2f} EUR (max tolerance: €0.50)")
-                
-                # CRITICAL: Check payment amount BEFORE processing to prevent underpayment exploitation
-                if not is_acceptable_payment and paid_eur_equivalent < target_eur_decimal:
-                    # Underpayment: Reject payment, credit balance, don't give product
-                    underpaid_eur = (target_eur_decimal - paid_eur_equivalent).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-                    logger.warning(f"❌ UNDERPAYMENT REJECTED: User {user_id} paid {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product. Short by {underpaid_eur:.2f} EUR. Crediting balance, NO PRODUCT DELIVERED.")
-                    
-                    # Credit the received amount to user's balance
-                    credit_future = asyncio.run_coroutine_threadsafe(
-                        credit_user_balance(user_id, paid_eur_equivalent, f"Underpayment refund on purchase {payment_id}", dummy_context),
-                        main_loop
-                    )
-                    credit_success = False
-                    try: 
-                        credit_success = credit_future.result(timeout=30)
-                    except Exception as e: 
-                        logger.error(f"Error crediting underpayment refund for {payment_id}: {e}", exc_info=True)
-                    
-                    if not credit_success:
-                        logger.critical(f"CRITICAL: Failed to credit balance for underpayment {payment_id} user {user_id}. Amount: {paid_eur_equivalent:.2f} EUR. MANUAL CHECK NEEDED!")
-                    
-                    # Send rejection message to user
-                    underpay_msg = f"❌ Payment Rejected: Underpayment detected!\n\nYou paid: {paid_eur_equivalent:.2f} EUR\nRequired: {target_eur_decimal:.2f} EUR\nShort by: {underpaid_eur:.2f} EUR\n\nYour payment has been refunded to your balance. Please try again with the correct amount."
-                    asyncio.run_coroutine_threadsafe(send_message_with_retry(telegram_app.bot, user_id, underpay_msg, parse_mode=None), main_loop)
-                    
-                    # Remove pending deposit as failed
-                    asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="underpayment_rejected"), main_loop)
-                    logger.info(f"Processed underpaid purchase {payment_id} for user {user_id}. Balance credited, items NOT delivered.")
-                    return Response("Underpayment rejected", status=200)
-                
-                # Process payment (overpayment or exact payment) - only if amount is sufficient
-                logger.info(f"{log_prefix} {payment_id}: Processing payment for user {user_id}. Paid {paid_eur_equivalent:.2f} EUR, target {target_eur_decimal:.2f} EUR.")
-                
-                # BULLETPROOF: Use the improved payment processing with retry and comprehensive error handling
-                logger.info(f"🔄 BULLETPROOF: Starting purchase finalization for {payment_id} user {user_id}")
-                
-                finalize_future = asyncio.run_coroutine_threadsafe(
-                    process_payment_with_retry(user_id, basket_snapshot, discount_code_used, payment_id, dummy_context),
-                    main_loop
-                )
-                purchase_finalized = False
-                
-                # BULLETPROOF: Multiple timeout attempts with different strategies
-                for attempt in range(3):
-                    try: 
-                        logger.info(f"🔄 BULLETPROOF: Purchase finalization attempt {attempt + 1}/3 for {payment_id}")
-                        # Increased timeout to 5 minutes per attempt for large media files
-                        purchase_finalized = finalize_future.result(timeout=300)  # 5 minutes per attempt
-                        break
-                    except asyncio.TimeoutError:
-                        logger.warning(f"⏰ BULLETPROOF: Purchase finalization timeout attempt {attempt + 1}/3 for {payment_id}")
-                        if attempt < 2:  # Not the last attempt
-                            # Try to cancel the future and restart
-                            finalize_future.cancel()
-                            time.sleep(5)  # Wait 5 seconds
-                            # Restart the process
-                            finalize_future = asyncio.run_coroutine_threadsafe(
-                                process_payment_with_retry(user_id, basket_snapshot, discount_code_used, payment_id, dummy_context),
-                                main_loop
-                            )
-                        else:
-                            # Last attempt failed
-                            logger.critical(f"🚨 CRITICAL TIMEOUT: Purchase finalization for {payment_id} user {user_id} failed after 3 attempts. Payment may be lost!")
-                            # Notify admin immediately about timeout
-                            if get_first_primary_admin_id():
-                                asyncio.run_coroutine_threadsafe(
-                                    send_message_with_retry(telegram_app.bot, get_first_primary_admin_id(), 
-                                        f"🚨 CRITICAL TIMEOUT: Purchase {payment_id} for user {user_id} failed after 3 attempts. Payment may be lost! Manual intervention required!"),
-                                    main_loop
-                                )
-                            # DO NOT remove pending deposit - keep it for manual recovery
-                            return Response("Purchase finalization timeout - payment kept for manual recovery", status=500)
-                    except Exception as e: 
-                        logger.critical(f"🚨 CRITICAL ERROR: Purchase finalization for {payment_id} user {user_id} failed with error: {e}. Payment may be lost!")
-                        # Notify admin about the error
-                        if get_first_primary_admin_id():
-                            asyncio.run_coroutine_threadsafe(
-                                send_message_with_retry(telegram_app.bot, get_first_primary_admin_id(), 
-                                    f"🚨 CRITICAL ERROR: Purchase {payment_id} for user {user_id} failed with error: {str(e)}. Payment may be lost! Manual intervention required!"),
-                                main_loop
-                            )
-                        # DO NOT remove pending deposit - keep it for manual recovery
-                        return Response("Purchase finalization error - payment kept for manual recovery", status=500)
-
-                # Process payment (overpayment or exact payment)
-                if purchase_finalized:
-                    logger.info(f"✅ BULLETPROOF: Purchase finalization SUCCESSFUL for {payment_id} user {user_id}")
-                    
-                    # Handle overpayment/exact payment
-                    if paid_eur_equivalent > target_eur_decimal:
-                        # Overpayment: Give product + credit excess
-                        overpaid_eur = (paid_eur_equivalent - target_eur_decimal).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-                        logger.info(f"💰 BULLETPROOF: Overpayment detected. User {user_id} paid {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product. Crediting {overpaid_eur:.2f} EUR to balance.")
-                        credit_future = asyncio.run_coroutine_threadsafe(
-                            credit_user_balance(user_id, overpaid_eur, f"Overpayment on purchase {payment_id}", dummy_context),
-                            main_loop
-                        )
-                        try: 
-                            credit_future.result(timeout=30)
-                            # Send overpayment message to user
-                            overpay_msg = f"✅ Purchase successful! You overpaid by {overpaid_eur:.2f} EUR. The excess has been added to your balance."
-                            asyncio.run_coroutine_threadsafe(send_message_with_retry(telegram_app.bot, user_id, overpay_msg, parse_mode=None), main_loop)
-                        except Exception as e:
-                            logger.error(f"Error crediting overpayment for {payment_id}: {e}", exc_info=True)
-                    else:
-                        # Exact payment: Just give product
-                        logger.info(f"💰 BULLETPROOF: Exact payment. User {user_id} paid exactly {paid_eur_equivalent:.2f} EUR for {target_eur_decimal:.2f} EUR product.")
-                    
-                    # CRITICAL: Only remove pending deposit AFTER confirming complete success
-                    asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="purchase_success"), main_loop)
-                    logger.info(f"✅ COMPLETE SUCCESS: {log_prefix} {payment_id} fully processed and pending record removed for user {user_id}")
-                else:
-                    logger.critical(f"🚨 CRITICAL: {log_prefix} {payment_id} paid, but process_successful_crypto_purchase FAILED for user {user_id}. Pending deposit NOT removed. Manual intervention required.")
-                    # Notify admin about critical failure
-                    if get_first_primary_admin_id():
-                        asyncio.run_coroutine_threadsafe(
-                            send_message_with_retry(telegram_app.bot, get_first_primary_admin_id(), 
-                                f"🚨 CRITICAL: Payment {payment_id} for user {user_id} FAILED after successful payment! Manual intervention required!"),
-                            main_loop
-                        )
-            else: # Refill
-                 credited_eur_amount = paid_eur_equivalent
-                 if credited_eur_amount > 0:
-                     future = asyncio.run_coroutine_threadsafe(
-                         payment.process_successful_refill(user_id, credited_eur_amount, payment_id, dummy_context),
-                         main_loop
-                     )
-                     try:
-                          db_update_success = future.result(timeout=30)
-                          if db_update_success:
-                               asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="refill_success"), main_loop)
-                               logger.info(f"Successfully processed and removed pending deposit {payment_id} (Status: {status})")
-                          else:
-                               logger.critical(f"CRITICAL: {log_prefix} {payment_id} ({status}) processed, but process_successful_refill FAILED for user {user_id}. Pending deposit NOT removed. Manual intervention required.")
-                     except asyncio.TimeoutError:
-                          logger.error(f"Timeout waiting for process_successful_refill result for {payment_id}. Pending deposit NOT removed.")
-                     except Exception as e:
-                          logger.error(f"Error getting result from process_successful_refill for {payment_id}: {e}. Pending deposit NOT removed.", exc_info=True)
-                 else:
-                     logger.warning(f"{log_prefix} {payment_id} ({status}): Calculated credited EUR is zero for user {user_id}. Removing pending deposit without updating balance.")
-                     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="zero_credit"), main_loop)
-        except (ValueError, TypeError) as e:
-            logger.error(f"Webhook Error: Invalid number format in webhook data for {payment_id}. Error: {e}. Data: {data}")
-        except Exception as e:
-            logger.error(f"Webhook Error: Could not process payment update {payment_id}.", exc_info=True)
-    elif status in ['failed', 'expired', 'refunded']:
-        logger.warning(f"Payment {payment_id} has status '{status}'. Removing pending record.")
-        pending_info_for_removal = None
-        try:
-            pending_info_for_removal = asyncio.run_coroutine_threadsafe(
-                 asyncio.to_thread(get_pending_deposit, payment_id), main_loop
-            ).result(timeout=5) 
-        except Exception as e:
-            logger.error(f"Error checking pending deposit for {payment_id} before removal/notification: {e}")
-        asyncio.run_coroutine_threadsafe(
-            asyncio.to_thread(remove_pending_deposit, payment_id, trigger="failure" if status == 'failed' else "expiry"),
-            main_loop
-        )
-        if pending_info_for_removal and telegram_app:
-            user_id = pending_info_for_removal['user_id']
-            is_purchase_failure = pending_info_for_removal.get('is_purchase') == 1
-            try:
-                conn_lang = None; user_lang = 'en'
-                try:
-                    conn_lang = get_db_connection()
-                    c_lang = conn_lang.cursor()
-                    c_lang.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
-                    lang_res = c_lang.fetchone()
-                    if lang_res and lang_res['language'] in LANGUAGES: user_lang = lang_res['language']
-                except Exception as lang_e: logger.error(f"Failed to get lang for user {user_id} notify: {lang_e}")
-                finally:
-                     if conn_lang: conn_lang.close()
-                lang_data_local = LANGUAGES.get(user_lang, LANGUAGES['en'])
-                if is_purchase_failure: fail_msg = lang_data_local.get("crypto_purchase_failed", "Payment Failed/Expired. Your items are no longer reserved.")
-                else: fail_msg = lang_data_local.get("payment_cancelled_or_expired", "Payment Status: Your payment ({payment_id}) was cancelled or expired.").format(payment_id=payment_id)
-                dummy_context = ContextTypes.DEFAULT_TYPE(application=telegram_app, chat_id=user_id, user_id=user_id)
-                asyncio.run_coroutine_threadsafe(send_message_with_retry(telegram_app.bot, user_id, fail_msg, parse_mode=None), main_loop)
-            except Exception as notify_e: logger.error(f"Error notifying user {user_id} about failed/expired payment {payment_id}: {notify_e}")
-    else:
-         logger.info(f"Webhook received for payment {payment_id} with status: {status} (ignored).")
-    return Response(status=200)
+# NowPayments webhook route removed - using direct Solana blockchain monitoring
 
 @flask_app.route(f"/telegram/{TOKEN}", methods=['POST'])
 async def telegram_webhook():
@@ -1224,6 +815,15 @@ def main() -> None:
             return
         await application.start()
         logger.info("Telegram application started (webhook mode).")
+        
+        # Start SOL payment monitoring in background
+        try:
+            from sol_payment import process_pending_sol_payments
+            asyncio.create_task(process_pending_sol_payments(application))
+            logger.info("🚀 Started SOL payment monitoring service")
+        except Exception as e:
+            logger.error(f"Failed to start SOL payment monitoring: {e}", exc_info=True)
+        
         port = int(os.environ.get("PORT", 10000))
         flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=port, debug=False), daemon=True)
         flask_thread.start()
