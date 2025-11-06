@@ -519,30 +519,30 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     keyboard = [
         [InlineKeyboardButton(admin_lang_data.get('admin_lang_button', '🌐 Language: {lang}').format(lang=lang_display), callback_data="admin_switch_lang")],
-        [InlineKeyboardButton("📊 Sales Analytics", callback_data="sales_analytics_menu")],
-        [InlineKeyboardButton("🔍 Recent Purchases", callback_data="adm_recent_purchases|0")],
-        [InlineKeyboardButton("➕ Add Products", callback_data="adm_city")],
-        [InlineKeyboardButton("📦 Bulk Add Products", callback_data="adm_bulk_city")],
-        [InlineKeyboardButton("🗑️ Manage Products", callback_data="adm_manage_products")],
-        [InlineKeyboardButton("🔍 Search User", callback_data="adm_search_user_start")],
-        [InlineKeyboardButton("👑 Manage Resellers", callback_data="manage_resellers_menu")],
-        [InlineKeyboardButton("🏷️ Manage Reseller Discounts", callback_data="manage_reseller_discounts_select_reseller|0")],
-        [InlineKeyboardButton("🏷️ Manage Discount Codes", callback_data="adm_manage_discounts")],
-        [InlineKeyboardButton("👋 Manage Welcome Msg", callback_data="adm_manage_welcome|0")],
-        [InlineKeyboardButton("📦 View Bot Stock", callback_data="view_stock")],
-        [InlineKeyboardButton("📜 View Added Products Log", callback_data="viewer_added_products|0")],
-        [InlineKeyboardButton("🗺️ Manage Districts", callback_data="adm_manage_districts")],
-        [InlineKeyboardButton("🏙️ Manage Cities", callback_data="adm_manage_cities")],
-        [InlineKeyboardButton("🧩 Manage Product Types", callback_data="adm_manage_types")],
-        [InlineKeyboardButton("🔄 Reassign Product Type", callback_data="adm_reassign_type_start")], # <<< MODIFIED: Already existed
-        [InlineKeyboardButton("🚫 Manage Reviews", callback_data="adm_manage_reviews|0")],
-        [InlineKeyboardButton("🧹 Clear ALL Reservations", callback_data="adm_clear_reservations_confirm")],
-        [InlineKeyboardButton("📢 Broadcast Message", callback_data="adm_broadcast_start")],
-        [InlineKeyboardButton("🔧 Manual Payment Recovery", callback_data="manual_payment_recovery")],
-        [InlineKeyboardButton("💰 Bulk Edit Prices", callback_data="adm_bulk_edit_prices_start")],
-        [InlineKeyboardButton("➕ Add New City", callback_data="adm_add_city")],
-        [InlineKeyboardButton("📸 Set Bot Media", callback_data="adm_set_media")],
-        [InlineKeyboardButton("🏠 User Home Menu", callback_data="back_start")]
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_sales_analytics', '📊 Sales Analytics'), callback_data="sales_analytics_menu")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_recent_purchases', '🔍 Recent Purchases'), callback_data="adm_recent_purchases|0")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_add_products', '➕ Add Products'), callback_data="adm_city")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_bulk_add', '📦 Bulk Add Products'), callback_data="adm_bulk_city")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_products', '🗑️ Manage Products'), callback_data="adm_manage_products")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_search_user', '🔍 Search User'), callback_data="adm_search_user_start")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_resellers', '👑 Manage Resellers'), callback_data="manage_resellers_menu")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_reseller_discounts', '🏷️ Manage Reseller Discounts'), callback_data="manage_reseller_discounts_select_reseller|0")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_discounts', '🏷️ Manage Discount Codes'), callback_data="adm_manage_discounts")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_welcome', '👋 Manage Welcome Msg'), callback_data="adm_manage_welcome|0")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_view_stock', '📦 View Bot Stock'), callback_data="view_stock")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_view_log', '📜 View Added Products Log'), callback_data="viewer_added_products|0")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_districts', '🗺️ Manage Districts'), callback_data="adm_manage_districts")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_cities', '🏙️ Manage Cities'), callback_data="adm_manage_cities")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_types', '🧩 Manage Product Types'), callback_data="adm_manage_types")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_reassign_type', '🔄 Reassign Product Type'), callback_data="adm_reassign_type_start")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_manage_reviews', '🚫 Manage Reviews'), callback_data="adm_manage_reviews|0")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_clear_reservations', '🧹 Clear ALL Reservations'), callback_data="adm_clear_reservations_confirm")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_broadcast', '📢 Broadcast Message'), callback_data="adm_broadcast_start")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_payment_recovery', '🔧 Manual Payment Recovery'), callback_data="manual_payment_recovery")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_bulk_edit_prices', '💰 Bulk Edit Prices'), callback_data="adm_bulk_edit_prices_start")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_add_city', '➕ Add New City'), callback_data="adm_add_city")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_set_media', '📸 Set Bot Media'), callback_data="adm_set_media")],
+        [InlineKeyboardButton(admin_lang_data.get('admin_button_home', '🏠 User Home Menu'), callback_data="back_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -598,14 +598,16 @@ async def handle_sales_analytics_menu(update: Update, context: ContextTypes.DEFA
     """Displays the sales analytics submenu."""
     query = update.callback_query
     if not is_primary_admin(query.from_user.id): return await query.answer("Access denied.", show_alert=True)
-    msg = "📊 Sales Analytics\n\nSelect a report or view:"
+    admin_lang, admin_lang_data = _get_admin_lang_data(context)
+    msg = admin_lang_data.get("admin_sales_analytics_title", "📊 Sales Analytics\n\nSelect a report or view:")
+    back_text = admin_lang_data.get("back_button", "⬅️ Back")
     keyboard = [
-        [InlineKeyboardButton("📈 View Dashboard", callback_data="sales_dashboard")],
-        [InlineKeyboardButton("📅 Generate Report", callback_data="sales_select_period|main")],
-        [InlineKeyboardButton("🏙️ Sales by City", callback_data="sales_select_period|by_city")],
-        [InlineKeyboardButton("💎 Sales by Type", callback_data="sales_select_period|by_type")],
-        [InlineKeyboardButton("🏆 Top Products", callback_data="sales_select_period|top_prod")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="admin_menu")]
+        [InlineKeyboardButton(admin_lang_data.get("admin_sales_view_dashboard", "📈 View Dashboard"), callback_data="sales_dashboard")],
+        [InlineKeyboardButton(admin_lang_data.get("admin_sales_generate_report", "📅 Generate Report"), callback_data="sales_select_period|main")],
+        [InlineKeyboardButton(admin_lang_data.get("admin_sales_by_city", "🏙️ Sales by City"), callback_data="sales_select_period|by_city")],
+        [InlineKeyboardButton(admin_lang_data.get("admin_sales_by_type", "💎 Sales by Type"), callback_data="sales_select_period|by_type")],
+        [InlineKeyboardButton(admin_lang_data.get("admin_sales_top_products", "🏆 Top Products"), callback_data="sales_select_period|top_prod")],
+        [InlineKeyboardButton(back_text, callback_data="admin_menu")]
     ]
     await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
@@ -765,31 +767,35 @@ async def handle_adm_city(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     """Admin selects city to add product to."""
     query = update.callback_query
     if not is_primary_admin(query.from_user.id): return await query.answer("Access denied.", show_alert=True)
-    lang, lang_data = _get_lang_data(context) # Use helper
+    admin_lang, admin_lang_data = _get_admin_lang_data(context) # Use admin language
     if not CITIES:
-        return await query.edit_message_text("No cities configured. Please add a city first via 'Manage Cities'.", parse_mode=None)
+        no_cities_msg = admin_lang_data.get("admin_no_cities", "No cities configured. Please add a city first via 'Manage Cities'.")
+        return await query.edit_message_text(no_cities_msg, parse_mode=None)
     sorted_city_ids = sorted(CITIES.keys(), key=lambda city_id: CITIES.get(city_id, ''))
     keyboard = [[InlineKeyboardButton(f"🏙️ {CITIES.get(c,'N/A')}", callback_data=f"adm_dist|{c}")] for c in sorted_city_ids]
-    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="admin_menu")])
-    select_city_text = lang_data.get("admin_select_city", "Select City to Add Product:")
+    back_text = admin_lang_data.get("back_button", "⬅️ Back")
+    keyboard.append([InlineKeyboardButton(back_text, callback_data="admin_menu")])
+    select_city_text = admin_lang_data.get("admin_select_city", "Select City to Add Product:")
     await query.edit_message_text(select_city_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 async def handle_adm_dist(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Admin selects district within the chosen city."""
     query = update.callback_query
     if not is_primary_admin(query.from_user.id): return await query.answer("Access denied.", show_alert=True)
+    admin_lang, admin_lang_data = _get_admin_lang_data(context) # Use admin language
     if not params: return await query.answer("Error: City ID missing.", show_alert=True)
     city_id = params[0]
     city_name = CITIES.get(city_id)
     if not city_name:
-        return await query.edit_message_text("Error: City not found. Please select again.", parse_mode=None)
+        error_msg = admin_lang_data.get("admin_error_city_not_found", "Error: City not found. Please select again.")
+        return await query.edit_message_text(error_msg, parse_mode=None)
     districts_in_city = DISTRICTS.get(city_id, {})
-    lang, lang_data = _get_lang_data(context) # Use helper
-    select_district_template = lang_data.get("admin_select_district", "Select District in {city}:")
+    select_district_template = admin_lang_data.get("admin_select_district", "Select District in {city}:")
     if not districts_in_city:
-        keyboard = [[InlineKeyboardButton("⬅️ Back to Cities", callback_data="adm_city")]]
-        return await query.edit_message_text(f"No districts found for {city_name}. Please add districts via 'Manage Districts'.",
-                                reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        back_text = admin_lang_data.get("back_cities_button", "⬅️ Back to Cities")
+        keyboard = [[InlineKeyboardButton(back_text, callback_data="adm_city")]]
+        no_districts_msg = admin_lang_data.get("admin_no_districts", "No districts found for {city}. Please add districts via 'Manage Districts'.").format(city=city_name)
+        return await query.edit_message_text(no_districts_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
     sorted_district_ids = sorted(districts_in_city.keys(), key=lambda dist_id: districts_in_city.get(dist_id,''))
     keyboard = []
     for d in sorted_district_ids:
@@ -797,7 +803,8 @@ async def handle_adm_dist(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         if dist_name:
             keyboard.append([InlineKeyboardButton(f"🏘️ {dist_name}", callback_data=f"adm_type|{city_id}|{d}")])
         else: logger.warning(f"District name missing for ID {d} in city {city_id}")
-    keyboard.append([InlineKeyboardButton("⬅️ Back to Cities", callback_data="adm_city")])
+    back_text = admin_lang_data.get("back_cities_button", "⬅️ Back to Cities")
+    keyboard.append([InlineKeyboardButton(back_text, callback_data="adm_city")])
     select_district_text = select_district_template.format(city=city_name)
     await query.edit_message_text(select_district_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
@@ -805,14 +812,15 @@ async def handle_adm_type(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     """Admin selects product type."""
     query = update.callback_query
     if not is_primary_admin(query.from_user.id): return await query.answer("Access denied.", show_alert=True)
+    admin_lang, admin_lang_data = _get_admin_lang_data(context) # Use admin language
     if not params or len(params) < 2: return await query.answer("Error: City or District ID missing.", show_alert=True)
     city_id, dist_id = params[0], params[1]
     city_name = CITIES.get(city_id)
     district_name = DISTRICTS.get(city_id, {}).get(dist_id)
     if not city_name or not district_name:
-        return await query.edit_message_text("Error: City/District not found. Please select again.", parse_mode=None)
-    lang, lang_data = _get_lang_data(context) # Use helper
-    select_type_text = lang_data.get("admin_select_type", "Select Product Type:")
+        error_msg = admin_lang_data.get("admin_error_location_not_found", "Error: City/District not found. Please select again.")
+        return await query.edit_message_text(error_msg, parse_mode=None)
+    select_type_text = admin_lang_data.get("admin_select_type", "Select Product Type:")
     if not PRODUCT_TYPES:
         return await query.edit_message_text("No product types configured. Add types via 'Manage Product Types'.", parse_mode=None)
 
