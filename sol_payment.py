@@ -11,6 +11,7 @@ import json
 import sqlite3
 import base58
 import os
+import random
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
@@ -216,6 +217,12 @@ async def create_sol_payment(
         sol_amount_base = (total_eur / sol_price).quantize(Decimal('0.000001'), rounding=ROUND_UP)
         sol_amount = sol_amount_base * Decimal('1.01')  # 1% buffer
         sol_amount = sol_amount.quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        
+        # Add random offset to make each payment unique (prevents collision when multiple users buy same item)
+        # Offset range: 0.000001 to 0.000099 SOL (~$0.0001 to $0.01)
+        random_offset = Decimal(str(random.randint(1, 99))) / Decimal('1000000')
+        sol_amount = sol_amount + random_offset
+        logger.debug(f"Added random offset: +{random_offset:.6f} SOL (final: {sol_amount:.6f} SOL)")
         
         # Minimum SOL amount (0.01 SOL to avoid dust)
         min_sol = Decimal('0.01')
