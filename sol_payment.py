@@ -899,7 +899,25 @@ async def check_pending_payments(context):
         c = conn.cursor()
         
         # First, recover any stuck 'processing' payments (stuck for >5 minutes)
+        # This handles cases where the process crashed during payment processing
+        logger.debug("🔄 Checking for stuck 'processing' payments...")
         five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        
+        # First, get details of stuck payments before updating
+        c.execute("""
+            SELECT payment_id, user_id, created_at, expected_wallet
+            FROM pending_sol_payments 
+            WHERE status = 'processing' 
+            AND created_at < ?
+        """, (five_min_ago,))
+        stuck_payments = c.fetchall()
+        
+        if stuck_payments:
+            logger.warning(f"♻️ [RECOVERY] Found {len(stuck_payments)} stuck 'processing' payment(s)")
+            for stuck in stuck_payments:
+                logger.warning(f"     Payment {stuck['payment_id']}: user={stuck['user_id']}, wallet={stuck['expected_wallet']}, stuck since {stuck['created_at']}")
+        
+        # Now update them back to pending
         c.execute("""
             UPDATE pending_sol_payments 
             SET status = 'pending'
@@ -909,8 +927,10 @@ async def check_pending_payments(context):
         
         recovered = c.rowcount
         if recovered > 0:
-            logger.warning(f"♻️ Recovered {recovered} stuck 'processing' payment(s) back to 'pending'")
+            logger.warning(f"  ✅ [RECOVERY] Recovered {recovered} payment(s) back to 'pending' status")
             conn.commit()
+        else:
+            logger.debug("  ✅ No stuck payments found")
         
         # Get all pending payments
         c.execute("""
@@ -1065,26 +1085,33 @@ async def check_pending_payments(context):
                     
                     # CRITICAL: Mark payment as 'processing' FIRST to prevent duplicate processing
                     # Use a separate connection with timeout and retry logic
+                    logger.info(f"  🔐 [LOCK] Attempting to acquire payment lock...")
                     payment_locked = False
+                    lock_start_time = time.time()
                     for attempt in range(3):  # Try 3 times
                         try:
+                            logger.debug(f"     Attempt {attempt + 1}/3: Opening lock connection...")
                             lock_conn = get_db_connection()
                             lock_conn.execute("PRAGMA busy_timeout = 5000")  # 5 second timeout
                             lock_c = lock_conn.cursor()
+                            logger.debug(f"     Attempt {attempt + 1}/3: Starting transaction with BEGIN IMMEDIATE...")
                             lock_c.execute("BEGIN IMMEDIATE")
                             
-                            # Check if transaction already processed
+                            # Check if transaction already processed (double-check race condition protection)
+                            logger.debug(f"     Attempt {attempt + 1}/3: Double-checking TX not already processed...")
                             lock_c.execute("""
                                 SELECT signature FROM processed_sol_transactions 
                                 WHERE signature = ?
                             """, (tx_signature,))
                             
                             if lock_c.fetchone():
-                                logger.warning(f"Transaction {tx_signature} was processed by another thread, skipping")
+                                logger.warning(f"     ⚠️ [LOCK] TX {tx_signature[:16]}... was processed by another thread during lock acquisition")
                                 lock_conn.close()
                                 break  # Exit retry loop, move to next TX
+                            logger.debug(f"     Attempt {attempt + 1}/3: ✅ TX still unprocessed")
                             
-                            # Mark payment as 'processing' immediately
+                            # Mark payment as 'processing' immediately (atomic status change)
+                            logger.debug(f"     Attempt {attempt + 1}/3: Updating payment status to 'processing'...")
                             lock_c.execute("""
                                 UPDATE pending_sol_payments 
                                 SET status = 'processing'
@@ -1092,18 +1119,22 @@ async def check_pending_payments(context):
                             """, (payment_id,))
                             
                             if lock_c.rowcount == 0:
-                                logger.warning(f"Payment {payment_id} already being processed or confirmed")
+                                logger.warning(f"     ⚠️ [LOCK] Payment {payment_id} status already changed (another thread acquired lock first)")
                                 lock_conn.close()
                                 break  # Exit retry loop, move to next TX
+                            logger.debug(f"     Attempt {attempt + 1}/3: ✅ Status updated to 'processing' (rowcount={lock_c.rowcount})")
                             
                             # Commit the lock
+                            logger.debug(f"     Attempt {attempt + 1}/3: Committing lock transaction...")
                             lock_conn.commit()
                             lock_conn.close()
-                            logger.info(f"🔒 Locked payment {payment_id} for processing (attempt {attempt + 1})")
+                            lock_duration = time.time() - lock_start_time
+                            logger.info(f"  ✅ [LOCK] Payment {payment_id} LOCKED for processing (attempt {attempt + 1}, duration: {lock_duration:.3f}s)")
                             payment_locked = True
                             break  # Success, exit retry loop
                             
                         except sqlite3.OperationalError as lock_error:
+                            logger.warning(f"     ⚠️ [LOCK] OperationalError on attempt {attempt + 1}: {lock_error}")
                             if 'lock_conn' in locals():
                                 try:
                                     lock_conn.close()
@@ -1112,16 +1143,17 @@ async def check_pending_payments(context):
                             
                             if "locked" in str(lock_error).lower() and attempt < 2:
                                 # Database locked, retry after brief delay
-                                logger.warning(f"Database locked on attempt {attempt + 1}, retrying...")
-                                await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                                retry_delay = 0.5 * (attempt + 1)
+                                logger.warning(f"     ⏳ [LOCK] Database locked, retrying in {retry_delay}s...")
+                                await asyncio.sleep(retry_delay)  # Exponential backoff
                                 continue
                             else:
-                                logger.error(f"Error locking payment (attempt {attempt + 1}): {lock_error}")
+                                logger.error(f"     ❌ [LOCK] Fatal error on attempt {attempt + 1}: {lock_error}")
                                 if attempt == 2:
-                                    # Final attempt failed
+                                    logger.error(f"     ❌ [LOCK] All 3 attempts exhausted")
                                     break
                         except Exception as lock_error:
-                            logger.error(f"Unexpected error locking payment: {lock_error}")
+                            logger.error(f"     ❌ [LOCK] Unexpected error on attempt {attempt + 1}: {lock_error}", exc_info=True)
                             if 'lock_conn' in locals():
                                 try:
                                     lock_conn.close()
@@ -1131,7 +1163,9 @@ async def check_pending_payments(context):
                     
                     # If we couldn't lock the payment, skip to next transaction
                     if not payment_locked:
-                        logger.error(f"❌ Failed to lock payment {payment_id} after 3 attempts, skipping")
+                        total_lock_duration = time.time() - lock_start_time
+                        logger.error(f"  ❌ [LOCK] Failed to acquire lock for payment {payment_id} after 3 attempts ({total_lock_duration:.3f}s total)")
+                        logger.error(f"     Payment will be retried in next monitoring cycle (60s)")
                         continue
                     
                     # If payment went to middleman, forward it (outside of any transaction)
@@ -1166,21 +1200,26 @@ async def check_pending_payments(context):
                             continue
                     
                     # Now start NEW atomic transaction for final confirmation
+                    logger.info(f"  💾 [CONFIRM] Starting final confirmation transaction...")
                     try:
+                        logger.debug(f"     BEGIN IMMEDIATE on main connection")
                         c.execute("BEGIN IMMEDIATE")
                         
                         # Final check if transaction was processed during forward
+                        logger.debug(f"     Triple-checking TX not processed...")
                         c.execute("""
                             SELECT signature FROM processed_sol_transactions 
                             WHERE signature = ?
                         """, (tx_signature,))
                         
                         if c.fetchone():
-                            logger.warning(f"Transaction {tx_signature} was processed during forwarding, skipping")
+                            logger.warning(f"  ⚠️ [CONFIRM] TX {tx_signature[:16]}... was processed during forwarding, rolling back")
                             c.execute("ROLLBACK")
                             continue
+                        logger.debug(f"     ✅ TX still unprocessed")
                         
                         # Mark transaction as processed (atomic with payment confirmation)
+                        logger.debug(f"     Inserting into processed_sol_transactions...")
                         c.execute("""
                             INSERT INTO processed_sol_transactions 
                             (signature, payment_id, processed_at, amount)
@@ -1191,17 +1230,21 @@ async def check_pending_payments(context):
                             datetime.now(timezone.utc).isoformat(),
                             float(tx_amount)
                         ))
+                        logger.debug(f"     ✅ TX marked as processed")
                         
                         # Mark payment as confirmed
+                        logger.debug(f"     Updating payment status to 'confirmed'...")
                         c.execute("""
                             UPDATE pending_sol_payments 
                             SET status = 'confirmed', transaction_signature = ?
                             WHERE payment_id = ?
                         """, (tx_signature, payment_id))
+                        logger.debug(f"     ✅ Payment marked as confirmed")
                         
                         # Commit atomic transaction
+                        logger.debug(f"     Committing final confirmation...")
                         conn.commit()
-                        logger.info(f"✅ Transaction {tx_signature} and payment {payment_id} atomically processed")
+                        logger.info(f"  ✅ [CONFIRM] Payment {payment_id} and TX {tx_signature[:16]}... ATOMICALLY confirmed")
                         
                     except Exception as atomic_error:
                         logger.error(f"Error in atomic transaction processing: {atomic_error}")
