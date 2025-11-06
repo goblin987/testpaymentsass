@@ -983,13 +983,22 @@ async def check_pending_payments(context):
         
         pending = c.fetchall()
         
+        # ✅ CRITICAL: Close main connection BEFORE processing payments
+        # This releases the shared lock and prevents self-deadlock
+        conn.close()
+        conn = None
+        logger.debug(f"  📊 Fetched {len(pending)} pending payment(s), main connection closed")
+        
         if not pending:
             logger.debug("No pending SOL payments to check")
             return
         
         logger.info(f"🔍 Checking {len(pending)} pending SOL payment(s)...")
         
-        for payment in pending:
+        # Convert to list of dicts to avoid sqlite3.Row issues after connection close
+        pending_list = [dict(p) for p in pending]
+        
+        for payment in pending_list:
             payment_id = payment['payment_id']
             user_id = payment['user_id']
             expected_amount = Decimal(str(payment['expected_sol_amount']))
@@ -1000,12 +1009,23 @@ async def check_pending_payments(context):
             # Check if payment expired
             if datetime.now(timezone.utc) > expires_at:
                 logger.info(f"⏱️ Payment {payment_id} expired")
-                c.execute("""
-                    UPDATE pending_sol_payments 
-                    SET status = 'expired' 
-                    WHERE payment_id = ? AND status IN ('pending', 'processing', 'failed')
-                """, (payment_id,))
-                conn.commit()
+                
+                # Open a new connection for this update
+                expire_conn = None
+                try:
+                    expire_conn = get_db_connection()
+                    expire_c = expire_conn.cursor()
+                    expire_c.execute("""
+                        UPDATE pending_sol_payments 
+                        SET status = 'expired' 
+                        WHERE payment_id = ? AND status IN ('pending', 'processing', 'failed')
+                    """, (payment_id,))
+                    expire_conn.commit()
+                except Exception as expire_error:
+                    logger.error(f"Error marking payment {payment_id} as expired: {expire_error}")
+                finally:
+                    if expire_conn:
+                        expire_conn.close()
                 
                 # Unreserve basket items
                 try:
