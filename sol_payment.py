@@ -957,44 +957,74 @@ async def check_pending_payments(context):
                     logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
                     
                     # CRITICAL: Mark payment as 'processing' FIRST to prevent duplicate processing
-                    # Use a separate connection to avoid transaction conflicts
-                    try:
-                        lock_conn = get_db_connection()
-                        lock_c = lock_conn.cursor()
-                        lock_c.execute("BEGIN IMMEDIATE")
-                        
-                        # Check if transaction already processed
-                        lock_c.execute("""
-                            SELECT signature FROM processed_sol_transactions 
-                            WHERE signature = ?
-                        """, (tx_signature,))
-                        
-                        if lock_c.fetchone():
-                            logger.warning(f"Transaction {tx_signature} was processed by another thread, skipping")
+                    # Use a separate connection with timeout and retry logic
+                    payment_locked = False
+                    for attempt in range(3):  # Try 3 times
+                        try:
+                            lock_conn = get_db_connection()
+                            lock_conn.execute("PRAGMA busy_timeout = 5000")  # 5 second timeout
+                            lock_c = lock_conn.cursor()
+                            lock_c.execute("BEGIN IMMEDIATE")
+                            
+                            # Check if transaction already processed
+                            lock_c.execute("""
+                                SELECT signature FROM processed_sol_transactions 
+                                WHERE signature = ?
+                            """, (tx_signature,))
+                            
+                            if lock_c.fetchone():
+                                logger.warning(f"Transaction {tx_signature} was processed by another thread, skipping")
+                                lock_conn.close()
+                                break  # Exit retry loop, move to next TX
+                            
+                            # Mark payment as 'processing' immediately
+                            lock_c.execute("""
+                                UPDATE pending_sol_payments 
+                                SET status = 'processing'
+                                WHERE payment_id = ? AND status = 'pending'
+                            """, (payment_id,))
+                            
+                            if lock_c.rowcount == 0:
+                                logger.warning(f"Payment {payment_id} already being processed or confirmed")
+                                lock_conn.close()
+                                break  # Exit retry loop, move to next TX
+                            
+                            # Commit the lock
+                            lock_conn.commit()
                             lock_conn.close()
-                            continue
-                        
-                        # Mark payment as 'processing' immediately
-                        lock_c.execute("""
-                            UPDATE pending_sol_payments 
-                            SET status = 'processing'
-                            WHERE payment_id = ? AND status = 'pending'
-                        """, (payment_id,))
-                        
-                        if lock_c.rowcount == 0:
-                            logger.warning(f"Payment {payment_id} already being processed or confirmed")
-                            lock_conn.close()
-                            continue
-                        
-                        # Commit the lock
-                        lock_conn.commit()
-                        lock_conn.close()
-                        logger.info(f"🔒 Locked payment {payment_id} for processing")
-                        
-                    except Exception as lock_error:
-                        logger.error(f"Error locking payment: {lock_error}")
-                        if 'lock_conn' in locals():
-                            lock_conn.close()
+                            logger.info(f"🔒 Locked payment {payment_id} for processing (attempt {attempt + 1})")
+                            payment_locked = True
+                            break  # Success, exit retry loop
+                            
+                        except sqlite3.OperationalError as lock_error:
+                            if 'lock_conn' in locals():
+                                try:
+                                    lock_conn.close()
+                                except:
+                                    pass
+                            
+                            if "locked" in str(lock_error).lower() and attempt < 2:
+                                # Database locked, retry after brief delay
+                                logger.warning(f"Database locked on attempt {attempt + 1}, retrying...")
+                                await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                                continue
+                            else:
+                                logger.error(f"Error locking payment (attempt {attempt + 1}): {lock_error}")
+                                if attempt == 2:
+                                    # Final attempt failed
+                                    break
+                        except Exception as lock_error:
+                            logger.error(f"Unexpected error locking payment: {lock_error}")
+                            if 'lock_conn' in locals():
+                                try:
+                                    lock_conn.close()
+                                except:
+                                    pass
+                            break
+                    
+                    # If we couldn't lock the payment, skip to next transaction
+                    if not payment_locked:
+                        logger.error(f"❌ Failed to lock payment {payment_id} after 3 attempts, skipping")
                         continue
                     
                     # If payment went to middleman, forward it (outside of any transaction)
