@@ -559,13 +559,13 @@ async def forward_split_payment(
     amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
     amount_wallet2 = (distributable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
     
-    logger.info(f"💰 Split: {amount_wallet1} SOL → Wallet1, {amount_wallet2} SOL → Wallet2")
+    logger.info(f"💰 Split: {amount_wallet1} SOL → Asmenine (20%), {amount_wallet2} SOL → Kolegos (80%)")
     
     results = {'wallet1': False, 'wallet2': False}
     signatures = {'wallet1': None, 'wallet2': None}
     
     try:
-        # Forward to Wallet 1 (20%)
+        # Forward to Asmenine (20%)
         try:
             sig1 = await send_sol_transaction(
                 from_keypair=SOL_MIDDLEMAN_KEYPAIR,
@@ -573,18 +573,18 @@ async def forward_split_payment(
                 amount_sol=amount_wallet1
             )
             if sig1:
-                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Wallet1: {sig1}")
+                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Asmenine (wallet1): {sig1}")
                 results['wallet1'] = True
                 signatures['wallet1'] = sig1
             else:
-                logger.error(f"❌ Failed to forward to Wallet1")
+                logger.error(f"❌ Failed to forward to Asmenine (wallet1)")
         except Exception as e:
-            logger.error(f"❌ Error forwarding to Wallet1: {e}")
+            logger.error(f"❌ Error forwarding to Asmenine (wallet1): {e}")
         
         # Small delay between transactions
         await asyncio.sleep(1)
         
-        # Forward to Wallet 2 (80%)
+        # Forward to Kolegos (80%)
         try:
             sig2 = await send_sol_transaction(
                 from_keypair=SOL_MIDDLEMAN_KEYPAIR,
@@ -592,13 +592,13 @@ async def forward_split_payment(
                 amount_sol=amount_wallet2
             )
             if sig2:
-                logger.info(f"✅ Forwarded {amount_wallet2} SOL to Wallet2: {sig2}")
+                logger.info(f"✅ Forwarded {amount_wallet2} SOL to Kolegos (wallet2): {sig2}")
                 results['wallet2'] = True
                 signatures['wallet2'] = sig2
             else:
-                logger.error(f"❌ Failed to forward to Wallet2")
+                logger.error(f"❌ Failed to forward to Kolegos (wallet2)")
         except Exception as e:
-            logger.error(f"❌ Error forwarding to Wallet2: {e}")
+            logger.error(f"❌ Error forwarding to Kolegos (wallet2): {e}")
         
         # Log the forwarding
         conn = None
@@ -728,7 +728,7 @@ async def process_pending_sol_payments(context):
         logger.critical("SOL payments will NOT be monitored automatically!")
         return
     
-    logger.info(f"💰 Monitoring wallets: W1={SOL_WALLET1_ADDRESS[:8]}..., W2={SOL_WALLET2_ADDRESS[:8]}..., MM={SOL_MIDDLEMAN_ADDRESS[:8]}...")
+    logger.info(f"💰 Monitoring wallets: Asmenine={SOL_WALLET1_ADDRESS[:8]}..., Kolegos={SOL_WALLET2_ADDRESS[:8]}..., Middleman={SOL_MIDDLEMAN_ADDRESS[:8]}...")
     
     while True:
         try:
@@ -899,8 +899,8 @@ async def check_pending_payments(context):
                                         f"Payment: {payment_id}\n"
                                         f"TX: {tx_signature}\n"
                                         f"Amount: {tx_amount} SOL\n"
-                                        f"Wallet1: {'✅' if forward_results.get('wallet1') else '❌'}\n"
-                                        f"Wallet2: {'✅' if forward_results.get('wallet2') else '❌'}\n"
+                                        f"Asmenine (wallet1): {'✅' if forward_results.get('wallet1') else '❌'}\n"
+                                        f"Kolegos (wallet2): {'✅' if forward_results.get('wallet2') else '❌'}\n"
                                         f"Manual intervention required!"
                                     )
                                     try:

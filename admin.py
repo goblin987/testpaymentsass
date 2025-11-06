@@ -851,18 +851,18 @@ async def handle_adm_wallet_selection(update: Update, context: ContextTypes.DEFA
     type_emoji = PRODUCT_TYPES.get(p_type, DEFAULT_PRODUCT_EMOJI)
     
     keyboard = [
-        [InlineKeyboardButton("💳 Wallet 1 (100%)", callback_data="adm_wallet|wallet1")],
-        [InlineKeyboardButton("💳 Wallet 2 (100%)", callback_data="adm_wallet|wallet2")],
-        [InlineKeyboardButton("💳 Split (20% W1 / 80% W2)", callback_data="adm_wallet|split")],
+        [InlineKeyboardButton("💳 Asmenine (100%)", callback_data="adm_wallet|wallet1")],
+        [InlineKeyboardButton("💳 Kolegos (100%)", callback_data="adm_wallet|wallet2")],
+        [InlineKeyboardButton("💳 Split (20% Asmenine / 80% Kolegos)", callback_data="adm_wallet|split")],
         [InlineKeyboardButton("❌ Cancel Add", callback_data="cancel_add")]
     ]
     
     msg = f"📦 Adding {type_emoji} {p_type} - {size}\n"
     msg += f"📍 {city} / {district}\n\n"
     msg += "💰 Select payout destination:\n\n"
-    msg += "• Wallet 1: All funds go to Wallet 1\n"
-    msg += "• Wallet 2: All funds go to Wallet 2\n"
-    msg += "• Split: 20% to Wallet 1, 80% to Wallet 2 (auto-forward via middleman)"
+    msg += "• Asmenine: All funds go to Asmenine wallet\n"
+    msg += "• Kolegos: All funds go to Kolegos wallet\n"
+    msg += "• Split: 20% to Asmenine, 80% to Kolegos (auto-forward via middleman)"
     
     await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
@@ -887,9 +887,9 @@ async def handle_adm_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     # Show wallet selection confirmation and ask for price
     wallet_display = {
-        'wallet1': '💳 Wallet 1 (100%)',
-        'wallet2': '💳 Wallet 2 (100%)',
-        'split': '💳 Split (20% W1 / 80% W2)'
+        'wallet1': '💳 Asmenine (100%)',
+        'wallet2': '💳 Kolegos (100%)',
+        'split': '💳 Split (20% Asmenine / 80% Kolegos)'
     }
     
     p_type = context.user_data.get("admin_product_type")
