@@ -1566,6 +1566,11 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # MODIFIED: Fetch city, district, original_text, payout_wallet
         c.execute(f"SELECT id, price, name, size, product_type, city, district, original_text, payout_wallet FROM products WHERE id IN ({placeholders})", product_ids_in_basket)
         product_db_details = {row['id']: dict(row) for row in c.fetchall()}
+        
+        # DEBUG: Log database query results
+        logger.info(f"🔍 [BASKET SNAPSHOT] User {user_id}: Fetched {len(product_db_details)} products from DB")
+        for prod_id, details in product_db_details.items():
+            logger.debug(f"  Product {prod_id}: payout_wallet={details.get('payout_wallet', 'MISSING')}, type={details.get('product_type')}, price={details.get('price')}")
 
         for item_context in basket:
              prod_id = item_context.get('product_id')
@@ -1588,8 +1593,20 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
                      "original_text": details.get('original_text'),
                      "payout_wallet": details.get('payout_wallet', 'wallet1')  # Include wallet routing info
                  }
+                 
+                 # DEBUG: Validate and log snapshot creation
+                 logger.debug(f"  📦 Item {prod_id}: Creating snapshot with payout_wallet='{item_snapshot['payout_wallet']}'")
+                 if not item_snapshot.get('payout_wallet'):
+                     logger.error(f"  ❌ CRITICAL: Item {prod_id} has NO payout_wallet in snapshot!")
+                 
                  valid_basket_items_snapshot.append(item_snapshot)
              else: logger.warning(f"Product {prod_id} missing during payment confirm user {user_id} (DB fetch).")
+        
+        # DEBUG: Log complete basket snapshot
+        if valid_basket_items_snapshot:
+            payout_wallets = [item.get('payout_wallet', 'MISSING') for item in valid_basket_items_snapshot]
+            logger.info(f"✅ [BASKET SNAPSHOT] User {user_id}: Created {len(valid_basket_items_snapshot)} snapshots, payout_wallets={payout_wallets}")
+            logger.debug(f"  Full snapshot: {valid_basket_items_snapshot}")
 
         if not valid_basket_items_snapshot:
              context.user_data['basket'] = []
@@ -1770,6 +1787,12 @@ async def _create_sol_payment_for_basket(update: Update, context: ContextTypes.D
     
     # Import SOL payment module
     from sol_payment import create_sol_payment
+    
+    # DEBUG: Log snapshot being passed to SOL payment
+    payout_wallets = [item.get('payout_wallet', 'MISSING') for item in basket_snapshot]
+    logger.info(f"🚀 [SOL PAYMENT] User {user_id}: Initiating SOL payment with {len(basket_snapshot)} items, payout_wallets={payout_wallets}")
+    logger.debug(f"  Snapshot: {basket_snapshot}")
+    logger.debug(f"  Total EUR: {total_eur}, Discount: {discount_code}")
     
     # Create SOL payment
     payment_result = await create_sol_payment(user_id, basket_snapshot, total_eur, discount_code)
@@ -2001,6 +2024,9 @@ async def handle_pay_single_item(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if reserved_id and product_details_for_snapshot:
+        # DEBUG: Log product details from database
+        logger.info(f"🔍 [SINGLE ITEM SNAPSHOT] User {user_id}: Product {reserved_id} payout_wallet={product_details_for_snapshot.get('payout_wallet', 'MISSING')}")
+        
         # MODIFIED: Enrich single_item_snapshot (including payout_wallet for SOL payments)
         single_item_snapshot = [{
             "product_id": reserved_id,
@@ -2013,6 +2039,12 @@ async def handle_pay_single_item(update: Update, context: ContextTypes.DEFAULT_T
             "original_text": product_details_for_snapshot.get('original_text'),
             "payout_wallet": product_details_for_snapshot.get('payout_wallet', 'wallet1')  # Include wallet routing info
         }]
+        
+        # DEBUG: Validate and log snapshot creation
+        if not single_item_snapshot[0].get('payout_wallet'):
+            logger.error(f"  ❌ CRITICAL: Single item {reserved_id} has NO payout_wallet in snapshot!")
+        logger.info(f"✅ [SINGLE ITEM SNAPSHOT] User {user_id}: Created snapshot with payout_wallet='{single_item_snapshot[0]['payout_wallet']}'")
+        logger.debug(f"  Full snapshot: {single_item_snapshot}")
 
         reseller_discount_percent = await asyncio.to_thread(get_reseller_discount, user_id, p_type)
         reseller_discount_amount = (original_price * reseller_discount_percent / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_DOWN)

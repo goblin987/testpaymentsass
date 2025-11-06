@@ -173,27 +173,38 @@ def determine_payment_wallet(basket_snapshot: list) -> str:
     - If any item is split, use middleman (will forward automatically)
     - If mixed wallets, use middleman (safer, can be manually distributed)
     """
+    logger.debug(f"🔍 [WALLET DETERMINATION] Analyzing {len(basket_snapshot) if basket_snapshot else 0} items")
+    
     if not basket_snapshot:
+        logger.warning("  ⚠️ Empty basket snapshot, defaulting to wallet1")
         return 'wallet1'
     
     wallets = set()
     has_split = False
     
-    for item in basket_snapshot:
+    for idx, item in enumerate(basket_snapshot):
         payout_wallet = item.get('payout_wallet', 'wallet1')
+        product_id = item.get('product_id', 'unknown')
+        logger.debug(f"  Item {idx + 1}/{len(basket_snapshot)}: product_id={product_id}, payout_wallet='{payout_wallet}'")
+        
         if payout_wallet == 'split':
             has_split = True
+            logger.debug(f"    ↳ Split detected!")
         wallets.add(payout_wallet)
     
     # If any item is split, use middleman
     if has_split:
+        logger.info(f"✅ [WALLET DETERMINATION] → middleman (split payment required)")
         return 'middleman'
     
     # If all items use same wallet, use that wallet directly
     if len(wallets) == 1:
-        return wallets.pop()
+        target = wallets.pop()
+        logger.info(f"✅ [WALLET DETERMINATION] → {target} (all items use same wallet)")
+        return target
     
     # Mixed wallets, use middleman for safety
+    logger.info(f"✅ [WALLET DETERMINATION] → middleman (mixed wallets: {wallets})")
     return 'middleman'
 
 
@@ -210,27 +221,36 @@ async def create_sol_payment(
     Returns:
         dict with payment details or error
     """
+    logger.info(f"💰 [CREATE SOL PAYMENT] User {user_id}: Starting payment creation for {total_eur} EUR")
+    logger.debug(f"  Basket: {len(basket_snapshot)} items, Discount: {discount_code}")
+    
     try:
         # Get SOL price
+        logger.debug("  Step 1: Fetching SOL price...")
         sol_price = await get_sol_price_eur()
         if not sol_price or sol_price <= Decimal('0'):
-            logger.error("Failed to fetch SOL price")
+            logger.error("  ❌ Failed to fetch SOL price")
             return {'error': 'price_fetch_failed'}
+        logger.debug(f"  ✅ SOL price: {sol_price:.2f} EUR")
         
         # Calculate SOL amount needed (add 1% buffer for price fluctuation)
+        logger.debug("  Step 2: Calculating SOL amount...")
         sol_amount_base = (total_eur / sol_price).quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        logger.debug(f"    Base amount: {sol_amount_base:.6f} SOL")
         sol_amount = sol_amount_base * Decimal('1.01')  # 1% buffer
         sol_amount = sol_amount.quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        logger.debug(f"    With 1% buffer: {sol_amount:.6f} SOL")
         
         # Add random offset to make each payment unique (prevents collision when multiple users buy same item)
         # Offset range: 0.000001 to 0.000099 SOL (~$0.0001 to $0.01)
         random_offset = Decimal(str(random.randint(1, 99))) / Decimal('1000000')
         sol_amount = sol_amount + random_offset
-        logger.debug(f"Added random offset: +{random_offset:.6f} SOL (final: {sol_amount:.6f} SOL)")
+        logger.info(f"  ✅ Final amount: {sol_amount:.6f} SOL (base: {sol_amount_base:.6f}, buffer: +1%, offset: +{random_offset:.6f})")
         
         # Minimum SOL amount (0.01 SOL to avoid dust)
         min_sol = Decimal('0.01')
         if sol_amount < min_sol:
+            logger.warning(f"  ❌ Amount {sol_amount:.6f} SOL below minimum {min_sol} SOL")
             return {
                 'error': 'amount_too_low',
                 'min_sol': float(min_sol),
@@ -238,14 +258,17 @@ async def create_sol_payment(
             }
         
         # Determine which wallet should receive payment
+        logger.debug("  Step 3: Determining payment wallet...")
         target_wallet = determine_payment_wallet(basket_snapshot)
-        logger.info(f"💳 Determined payment destination for user {user_id}: {target_wallet}")
-        logger.debug(f"Basket payout_wallet values: {[item.get('payout_wallet', 'N/A') for item in basket_snapshot]}")
+        logger.info(f"  💳 Payment destination: {target_wallet}")
+        logger.debug(f"  Basket payout_wallet values: {[item.get('payout_wallet', 'N/A') for item in basket_snapshot]}")
         
         # Generate unique payment ID
         payment_id = f"SOL_{user_id}_{int(time.time())}_{hex(int(time.time() * 1000000))[-6:]}"
+        logger.debug(f"  Generated payment_id: {payment_id}")
         
         # Store pending payment in database
+        logger.debug("  Step 4: Storing payment in database...")
         conn = None
         try:
             conn = get_db_connection()
@@ -254,6 +277,7 @@ async def create_sol_payment(
             now = datetime.now(timezone.utc)
             expires = now + timedelta(minutes=20)  # 20 minute expiry
             
+            logger.debug(f"    Inserting: payment_id={payment_id}, amount={sol_amount:.6f} SOL, wallet={target_wallet}")
             c.execute("""
                 INSERT INTO pending_sol_payments 
                 (payment_id, user_id, expected_sol_amount, expected_wallet, 
@@ -271,7 +295,7 @@ async def create_sol_payment(
             ))
             
             conn.commit()
-            logger.info(f"✅ Created SOL payment {payment_id}: {sol_amount} SOL (~{total_eur} EUR) to {target_wallet}")
+            logger.info(f"✅ [CREATE SOL PAYMENT] Payment {payment_id} created: {sol_amount:.6f} SOL (~{total_eur} EUR) → {target_wallet}")
             
         except sqlite3.Error as e:
             logger.error(f"Database error creating SOL payment: {e}")
@@ -281,12 +305,18 @@ async def create_sol_payment(
                 conn.close()
         
         # Get wallet address to display
+        logger.debug("  Step 5: Resolving wallet address...")
         if target_wallet == 'wallet1':
             wallet_address = SOL_WALLET1_ADDRESS
+            logger.debug(f"    wallet1 → {wallet_address[:8]}...")
         elif target_wallet == 'wallet2':
             wallet_address = SOL_WALLET2_ADDRESS
+            logger.debug(f"    wallet2 → {wallet_address[:8]}...")
         else:  # middleman
             wallet_address = SOL_MIDDLEMAN_ADDRESS
+            logger.debug(f"    middleman → {wallet_address[:8]}...")
+        
+        logger.info(f"🎉 [CREATE SOL PAYMENT] User {user_id}: Payment ready! {sol_amount:.6f} SOL to {wallet_address[:8]}...")
         
         return {
             'payment_id': payment_id,
@@ -562,7 +592,8 @@ async def forward_split_payment(
 
 async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decimal, source_signature: str) -> Dict[str, bool]:
     """Internal function that does the actual forwarding. Called within lock."""
-    logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL (LOCK ACQUIRED)")
+    logger.info(f"🔄 [SPLIT FORWARD] Payment {payment_id}: Starting split forward (LOCK ACQUIRED)")
+    logger.info(f"  Source TX: {source_signature[:16]}..., Amount: {total_sol_amount:.6f} SOL")
     
     # Solana transaction fees: Each transfer costs ~0.000005 SOL
     # The fee is deducted from the sender's balance IN ADDITION to the transfer amount
@@ -571,41 +602,69 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     TOTAL_FEES = TX_FEE_ESTIMATE * 2  # Two transactions (20% + 80%)
     MIN_RESERVE_BALANCE = Decimal('0.002')  # Permanent reserve: rent (~0.00089088) + buffer
     
+    logger.debug(f"  Constants: TX_FEE={TX_FEE_ESTIMATE:.6f}, TOTAL_FEES={TOTAL_FEES:.6f}, MIN_RESERVE={MIN_RESERVE_BALANCE:.6f}")
+    
     # Check middleman wallet balance and calculate how much we can safely forward
+    logger.debug("  Step 1: Checking middleman wallet balance...")
     try:
         middleman_pubkey = Pubkey.from_string(SOL_MIDDLEMAN_ADDRESS)
         balance_response = solana_client.get_balance(middleman_pubkey)
         current_balance = Decimal(balance_response.value) / Decimal(1_000_000_000)
-        logger.info(f"💰 Middleman wallet balance: {current_balance} SOL")
+        logger.info(f"  💰 Current middleman balance: {current_balance:.6f} SOL")
         
         # Calculate maximum we can forward while keeping the reserve
+        logger.debug("  Step 2: Calculating forwardable amount...")
+        logger.debug(f"    Formula: max_forwardable = current_balance - MIN_RESERVE - TOTAL_FEES")
+        logger.debug(f"    Formula: max_forwardable = {current_balance:.6f} - {MIN_RESERVE_BALANCE:.6f} - {TOTAL_FEES:.6f}")
         max_forwardable = current_balance - MIN_RESERVE_BALANCE - TOTAL_FEES
+        logger.debug(f"    Result: max_forwardable = {max_forwardable:.6f} SOL")
         
         if max_forwardable <= 0:
-            logger.error(f"❌ Middleman wallet balance too low to forward!")
-            logger.error(f"   Current: {current_balance} SOL")
-            logger.error(f"   Reserve needed: {MIN_RESERVE_BALANCE} SOL")
-            logger.error(f"   Fees needed: {TOTAL_FEES} SOL")
-            logger.error(f"⚠️ URGENT: Fund middleman wallet with at least 0.005 SOL!")
+            logger.error(f"  ❌ Middleman wallet balance too low to forward!")
+            logger.error(f"     Current: {current_balance:.6f} SOL")
+            logger.error(f"     Reserve needed: {MIN_RESERVE_BALANCE:.6f} SOL")
+            logger.error(f"     Fees needed: {TOTAL_FEES:.6f} SOL")
+            logger.error(f"     Shortfall: {abs(max_forwardable):.6f} SOL")
+            logger.error(f"  ⚠️ URGENT: Fund middleman wallet with at least 0.005 SOL!")
             return {'wallet1': False, 'wallet2': False}
         
         # Determine how much to forward
+        logger.debug("  Step 3: Determining forward amount...")
         if max_forwardable >= total_sol_amount:
             # IDEAL: We can forward the full payment amount
             forwardable = total_sol_amount
-            logger.info(f"✅ Can forward FULL amount ({forwardable} SOL) - reserve OK")
+            logger.info(f"  ✅ Can forward FULL payment amount: {forwardable:.6f} SOL")
+            logger.debug(f"     max_forwardable ({max_forwardable:.6f}) >= total_sol_amount ({total_sol_amount:.6f})")
         else:
             # FALLBACK: Forward only what we can while keeping reserve
             forwardable = max_forwardable
-            logger.warning(f"⚠️ Can only forward {forwardable} SOL (not full {total_sol_amount} SOL)")
-            logger.warning(f"   Reason: Must keep {MIN_RESERVE_BALANCE} SOL reserve + {TOTAL_FEES} SOL fees")
+            shortfall = total_sol_amount - max_forwardable
+            logger.warning(f"  ⚠️ Can only forward {forwardable:.6f} SOL (shortfall: {shortfall:.6f} SOL)")
+            logger.warning(f"     Requested: {total_sol_amount:.6f} SOL")
+            logger.warning(f"     Available: {max_forwardable:.6f} SOL (after reserve + fees)")
+            logger.warning(f"     Reason: Must keep {MIN_RESERVE_BALANCE:.6f} SOL reserve + {TOTAL_FEES:.6f} SOL fees")
         
         # Split the forwardable amount 20/80
-        amount_wallet1 = (forwardable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-        amount_wallet2 = (forwardable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        logger.debug("  Step 4: Calculating split amounts...")
+        amount_wallet1_raw = forwardable * Decimal('0.20')
+        amount_wallet2_raw = forwardable * Decimal('0.80')
+        amount_wallet1 = amount_wallet1_raw.quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        amount_wallet2 = amount_wallet2_raw.quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
         
-        logger.info(f"💰 Split: {amount_wallet1} SOL → Asmenine (20%), {amount_wallet2} SOL → Kolegos (80%)")
-        logger.info(f"💰 After forward, wallet will have: ~{current_balance - forwardable - TOTAL_FEES} SOL")
+        logger.debug(f"    20% of {forwardable:.6f} = {amount_wallet1_raw:.6f} → {amount_wallet1:.6f} SOL (rounded down)")
+        logger.debug(f"    80% of {forwardable:.6f} = {amount_wallet2_raw:.6f} → {amount_wallet2:.6f} SOL (rounded down)")
+        logger.info(f"  💰 Split amounts:")
+        logger.info(f"     Asmenine (20%): {amount_wallet1:.6f} SOL")
+        logger.info(f"     Kolegos (80%):  {amount_wallet2:.6f} SOL")
+        logger.info(f"     Total split:    {amount_wallet1 + amount_wallet2:.6f} SOL")
+        
+        predicted_balance = current_balance - forwardable - TOTAL_FEES
+        logger.info(f"  📊 Balance prediction:")
+        logger.info(f"     Before: {current_balance:.6f} SOL")
+        logger.info(f"     After:  ~{predicted_balance:.6f} SOL (minus fees)")
+        
+        if predicted_balance < MIN_RESERVE_BALANCE:
+            logger.error(f"  ⚠️ WARNING: Predicted balance ({predicted_balance:.6f}) below reserve ({MIN_RESERVE_BALANCE:.6f})!")
     
     except Exception as e:
         logger.error(f"❌ Failed to check middleman balance: {e}", exc_info=True)
@@ -628,6 +687,9 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     try:
         # IMPORTANT: Forward to Kolegos (80%) FIRST - larger amount more likely to fail
         # If 80% fails, we don't send the 20%, preventing partial splits
+        logger.info(f"  📤 [FORWARD 1/2] Sending {amount_wallet2:.6f} SOL to Kolegos (80%)...")
+        logger.debug(f"     From: {SOL_MIDDLEMAN_ADDRESS[:8]}...")
+        logger.debug(f"     To: {SOL_WALLET2_ADDRESS[:8]}...")
         try:
             sig2 = await send_sol_transaction(
                 from_keypair=SOL_MIDDLEMAN_KEYPAIR,
@@ -635,22 +697,29 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
                 amount_sol=amount_wallet2
             )
             if sig2:
-                logger.info(f"✅ Forwarded {amount_wallet2} SOL to Kolegos (wallet2): {sig2}")
+                logger.info(f"  ✅ [FORWARD 1/2] Success! TX: {sig2[:16]}...")
+                logger.info(f"     Kolegos received {amount_wallet2:.6f} SOL")
                 results['wallet2'] = True
                 signatures['wallet2'] = sig2
             else:
-                logger.error(f"❌ Failed to forward to Kolegos (wallet2) - no signature returned")
+                logger.error(f"  ❌ [FORWARD 1/2] Failed - no signature returned")
+                logger.error(f"     Kolegos (wallet2) forward failed, aborting split")
                 # Don't proceed to wallet1 if wallet2 failed
                 return results
         except Exception as e:
-            logger.error(f"❌ Failed to forward to Kolegos (wallet2): {e}", exc_info=True)
+            logger.error(f"  ❌ [FORWARD 1/2] Exception: {e}", exc_info=True)
+            logger.error(f"     Kolegos (wallet2) forward failed, aborting split")
             # Don't proceed to wallet1 if wallet2 failed
             return results
         
         # Small delay between transactions
+        logger.debug(f"  ⏳ Waiting 1 second before second transfer...")
         await asyncio.sleep(1)
         
         # Forward to Asmenine (20%) - only if Kolegos succeeded
+        logger.info(f"  📤 [FORWARD 2/2] Sending {amount_wallet1:.6f} SOL to Asmenine (20%)...")
+        logger.debug(f"     From: {SOL_MIDDLEMAN_ADDRESS[:8]}...")
+        logger.debug(f"     To: {SOL_WALLET1_ADDRESS[:8]}...")
         try:
             sig1 = await send_sol_transaction(
                 from_keypair=SOL_MIDDLEMAN_KEYPAIR,
@@ -658,15 +727,19 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
                 amount_sol=amount_wallet1
             )
             if sig1:
-                logger.info(f"✅ Forwarded {amount_wallet1} SOL to Asmenine (wallet1): {sig1}")
+                logger.info(f"  ✅ [FORWARD 2/2] Success! TX: {sig1[:16]}...")
+                logger.info(f"     Asmenine received {amount_wallet1:.6f} SOL")
                 results['wallet1'] = True
                 signatures['wallet1'] = sig1
             else:
-                logger.error(f"❌ Failed to forward to Asmenine (wallet1) - no signature returned")
+                logger.error(f"  ❌ [FORWARD 2/2] Failed - no signature returned")
+                logger.error(f"     Asmenine (wallet1) forward failed!")
         except Exception as e:
-            logger.error(f"❌ Failed to forward to Asmenine (wallet1): {e}", exc_info=True)
+            logger.error(f"  ❌ [FORWARD 2/2] Exception: {e}", exc_info=True)
+            logger.error(f"     Asmenine (wallet1) forward failed!")
         
         # Log the forwarding
+        logger.debug("  Step 5: Recording forward in database...")
         conn = None
         try:
             conn = get_db_connection()
@@ -689,16 +762,28 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
             ))
             
             conn.commit()
+            logger.debug("     ✅ Forward logged to database")
         except sqlite3.Error as e:
-            logger.error(f"Database error logging forward: {e}")
+            logger.error(f"     ❌ Database error logging forward: {e}")
         finally:
             if conn:
                 conn.close()
         
+        # Final summary
+        success_count = sum(1 for v in results.values() if v)
+        if all(results.values()):
+            logger.info(f"🎉 [SPLIT FORWARD] Payment {payment_id}: SUCCESS - Both transfers completed")
+            logger.info(f"   Asmenine: {amount_wallet1:.6f} SOL ✅")
+            logger.info(f"   Kolegos:  {amount_wallet2:.6f} SOL ✅")
+        else:
+            logger.error(f"❌ [SPLIT FORWARD] Payment {payment_id}: PARTIAL/FAILED - {success_count}/2 transfers completed")
+            logger.error(f"   Asmenine: {amount_wallet1:.6f} SOL {'✅' if results['wallet1'] else '❌'}")
+            logger.error(f"   Kolegos:  {amount_wallet2:.6f} SOL {'✅' if results['wallet2'] else '❌'}")
+        
         return results
         
     except Exception as e:
-        logger.error(f"Error in forward_split_payment: {e}", exc_info=True)
+        logger.error(f"❌ [SPLIT FORWARD] Unexpected error: {e}", exc_info=True)
         return results
 
 
@@ -880,7 +965,8 @@ async def check_pending_payments(context):
             else:  # middleman
                 wallet_address = SOL_MIDDLEMAN_ADDRESS
             
-            logger.info(f"💳 Payment {payment_id}: expecting {expected_amount:.6f} SOL to {wallet_address[:8]}...")
+            logger.info(f"💳 [MONITOR] Payment {payment_id}: Expecting {expected_amount:.6f} SOL → {wallet_address[:8]}... (wallet={expected_wallet})")
+            logger.debug(f"  Created: {created_at.isoformat()}, Expires: {expires_at.isoformat()}")
             
             # Check if this payment is already being processed by another thread
             c.execute("""
@@ -898,63 +984,84 @@ async def check_pending_payments(context):
                     continue
             
             # Check recent transactions to this wallet
+            logger.debug(f"  📡 Fetching transactions for {wallet_address[:8]}...")
             transactions = await check_wallet_transactions(wallet_address, limit=20)
-            logger.info(f"📊 Found {len(transactions)} transaction(s) for wallet {wallet_address[:8]}...")
+            logger.info(f"  📊 Found {len(transactions)} transaction(s) for wallet {wallet_address[:8]}...")
+            
+            if not transactions:
+                logger.debug(f"  ⏭️ No transactions found, skipping payment {payment_id}")
+                continue
             
             # Look for matching transaction - STRICT tolerance (0.1% for random offset variance)
             # Random offset adds 0.000001-0.000099 SOL, so 0.1% tolerance is safe
             tolerance = expected_amount * Decimal('0.001')  # 0.1% tolerance (was 1%)
             min_amount = expected_amount - tolerance
             max_amount = expected_amount + tolerance
-            logger.debug(f"Tolerance range: {min_amount:.6f} to {max_amount:.6f} SOL (±0.1%)")
+            logger.info(f"  🔍 [MATCHING] Tolerance range: {min_amount:.6f} to {max_amount:.6f} SOL (±0.1%)")
+            logger.debug(f"    Expected: {expected_amount:.6f} SOL ± {tolerance:.6f} SOL")
             
             # Only consider recent transactions (within 30 minutes of payment creation)
             recent_cutoff = created_at - timedelta(minutes=30)
+            logger.debug(f"    Recent cutoff: {recent_cutoff.isoformat()} (30 min before payment creation)")
             
-            for tx in transactions:
+            matched_tx = None
+            for tx_idx, tx in enumerate(transactions, 1):
                 tx_amount = tx['amount_sol']
                 tx_signature = tx['signature']
                 tx_timestamp = tx.get('timestamp')
+                
+                logger.debug(f"    TX {tx_idx}/{len(transactions)}: {tx_signature[:16]}... = {tx_amount:.6f} SOL")
                 
                 # Skip transactions that are too old (before payment was created minus 30 min buffer)
                 if tx_timestamp:
                     tx_datetime = datetime.fromtimestamp(tx_timestamp, tz=timezone.utc)
                     if tx_datetime < recent_cutoff:
-                        logger.debug(f"Skipping old transaction {tx_signature[:16]}... from {tx_datetime.isoformat()}")
+                        logger.debug(f"      ⏭️ Too old ({tx_datetime.isoformat()}) - skipping")
                         continue
-                
-                logger.debug(f"Checking TX {tx_signature[:16]}...: {tx_amount:.6f} SOL")
+                    logger.debug(f"      ✅ Timestamp OK ({tx_datetime.isoformat()})")
+                else:
+                    logger.debug(f"      ⚠️ No timestamp, allowing")
                 
                 # Check if transaction matches expected amount (within tolerance, both upper AND lower bounds)
                 if min_amount <= tx_amount <= max_amount:
-                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL (expected: {expected_amount:.6f} ±0.1%)")
+                    diff = tx_amount - expected_amount
+                    diff_percent = (diff / expected_amount * 100) if expected_amount > 0 else 0
+                    logger.info(f"  💰 [MATCH FOUND] TX {tx_signature[:16]}... = {tx_amount:.6f} SOL")
+                    logger.info(f"      Expected: {expected_amount:.6f} SOL, Diff: {diff:+.6f} SOL ({diff_percent:+.3f}%)")
                     # Check if we already processed this transaction
+                    logger.debug(f"      🔍 Checking if TX already processed...")
                     c.execute("""
                         SELECT signature FROM processed_sol_transactions 
                         WHERE signature = ?
                     """, (tx_signature,))
                     
                     if c.fetchone():
-                        logger.debug(f"Transaction {tx_signature} already processed")
+                        logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already processed, skipping")
                         continue
+                    logger.debug(f"      ✅ TX not in processed_sol_transactions")
                     
                     # Also verify this transaction isn't already assigned to another payment
+                    logger.debug(f"      🔍 Checking if TX assigned to different payment...")
                     c.execute("""
                         SELECT payment_id FROM processed_sol_transactions 
                         WHERE signature = ? AND payment_id != ?
                     """, (tx_signature, payment_id))
                     
-                    if c.fetchone():
-                        logger.warning(f"Transaction {tx_signature} already used for different payment")
+                    other_payment = c.fetchone()
+                    if other_payment:
+                        logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already used for payment {other_payment[0]}, skipping")
                         continue
+                    logger.debug(f"      ✅ TX not assigned to other payment")
                     
                     # Transaction is already confirmed (we only get confirmed txs from check_wallet_transactions)
                     # The 'confirmed' field in tx dict indicates it passed all checks
+                    logger.debug(f"      🔍 Checking TX confirmation status...")
                     if not tx.get('confirmed'):
-                        logger.warning(f"Transaction {tx_signature} not confirmed")
+                        logger.warning(f"      ❌ TX {tx_signature[:16]}... not confirmed, skipping")
                         continue
+                    logger.debug(f"      ✅ TX confirmed")
                     
-                    logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
+                    logger.info(f"  ✅ [PAYMENT MATCHED] Payment {payment_id} ← TX {tx_signature[:16]}...")
                     
                     # CRITICAL: Mark payment as 'processing' FIRST to prevent duplicate processing
                     # Use a separate connection with timeout and retry logic
@@ -1118,6 +1225,14 @@ async def check_pending_payments(context):
                     )
                     
                     break  # Payment processed, move to next pending payment
+                else:
+                    # Transaction amount doesn't match
+                    if tx_amount < min_amount:
+                        shortage = min_amount - tx_amount
+                        logger.debug(f"      ⏭️ Amount too low by {shortage:.6f} SOL ({min_amount:.6f} needed)")
+                    else:
+                        excess = tx_amount - max_amount
+                        logger.debug(f"      ⏭️ Amount too high by {excess:.6f} SOL ({max_amount:.6f} max)")
         
     except sqlite3.Error as e:
         logger.error(f"Database error checking payments: {e}")
