@@ -813,6 +813,20 @@ async def check_pending_payments(context):
         conn = get_db_connection()
         c = conn.cursor()
         
+        # First, recover any stuck 'processing' payments (stuck for >5 minutes)
+        five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        c.execute("""
+            UPDATE pending_sol_payments 
+            SET status = 'pending'
+            WHERE status = 'processing' 
+            AND created_at < ?
+        """, (five_min_ago,))
+        
+        recovered = c.rowcount
+        if recovered > 0:
+            logger.warning(f"♻️ Recovered {recovered} stuck 'processing' payment(s) back to 'pending'")
+            conn.commit()
+        
         # Get all pending payments
         c.execute("""
             SELECT payment_id, user_id, expected_sol_amount, expected_wallet, 
@@ -843,7 +857,7 @@ async def check_pending_payments(context):
                 c.execute("""
                     UPDATE pending_sol_payments 
                     SET status = 'expired' 
-                    WHERE payment_id = ?
+                    WHERE payment_id = ? AND status IN ('pending', 'processing', 'failed')
                 """, (payment_id,))
                 conn.commit()
                 
@@ -868,15 +882,31 @@ async def check_pending_payments(context):
             
             logger.info(f"💳 Payment {payment_id}: expecting {expected_amount:.6f} SOL to {wallet_address[:8]}...")
             
+            # Check if this payment is already being processed by another thread
+            c.execute("""
+                SELECT status FROM pending_sol_payments 
+                WHERE payment_id = ?
+            """, (payment_id,))
+            current_status_row = c.fetchone()
+            if current_status_row:
+                current_status = current_status_row[0]
+                if current_status == 'processing':
+                    logger.debug(f"Payment {payment_id} is already being processed, skipping")
+                    continue
+                elif current_status == 'confirmed':
+                    logger.debug(f"Payment {payment_id} already confirmed, skipping")
+                    continue
+            
             # Check recent transactions to this wallet
             transactions = await check_wallet_transactions(wallet_address, limit=20)
             logger.info(f"📊 Found {len(transactions)} transaction(s) for wallet {wallet_address[:8]}...")
             
-            # Look for matching transaction (allow 1% tolerance for price fluctuation/fees)
-            tolerance = expected_amount * Decimal('0.01')
+            # Look for matching transaction - STRICT tolerance (0.1% for random offset variance)
+            # Random offset adds 0.000001-0.000099 SOL, so 0.1% tolerance is safe
+            tolerance = expected_amount * Decimal('0.001')  # 0.1% tolerance (was 1%)
             min_amount = expected_amount - tolerance
             max_amount = expected_amount + tolerance
-            logger.debug(f"Tolerance range: {min_amount:.6f} to {max_amount:.6f} SOL")
+            logger.debug(f"Tolerance range: {min_amount:.6f} to {max_amount:.6f} SOL (±0.1%)")
             
             # Only consider recent transactions (within 30 minutes of payment creation)
             recent_cutoff = created_at - timedelta(minutes=30)
@@ -897,7 +927,7 @@ async def check_pending_payments(context):
                 
                 # Check if transaction matches expected amount (within tolerance, both upper AND lower bounds)
                 if min_amount <= tx_amount <= max_amount:
-                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL (expected: {expected_amount:.6f} ±1%)")
+                    logger.info(f"💰 Found matching amount! TX: {tx_signature[:16]}... = {tx_amount:.6f} SOL (expected: {expected_amount:.6f} ±0.1%)")
                     # Check if we already processed this transaction
                     c.execute("""
                         SELECT signature FROM processed_sol_transactions 
@@ -941,12 +971,26 @@ async def check_pending_payments(context):
                             c.execute("ROLLBACK")
                             continue
                         
-                        # If payment went to middleman, forward it BEFORE marking as processed
+                        # CRITICAL: Mark payment as 'processing' immediately to prevent duplicate processing
+                        c.execute("""
+                            UPDATE pending_sol_payments 
+                            SET status = 'processing'
+                            WHERE payment_id = ? AND status = 'pending'
+                        """, (payment_id,))
+                        
+                        if c.rowcount == 0:
+                            logger.warning(f"Payment {payment_id} already being processed or confirmed")
+                            c.execute("ROLLBACK")
+                            continue
+                        
+                        # Commit the 'processing' status immediately
+                        conn.commit()
+                        logger.info(f"🔒 Locked payment {payment_id} for processing")
+                        
+                        # If payment went to middleman, forward it
                         forward_success = True
                         if expected_wallet == 'middleman':
                             logger.info(f"🔄 Payment to middleman, initiating split forward...")
-                            # Rollback transaction temporarily for forwarding
-                            c.execute("ROLLBACK")
                             
                             forward_results = await forward_split_payment(
                                 payment_id,
@@ -958,22 +1002,35 @@ async def check_pending_payments(context):
                             
                             if not forward_success:
                                 logger.error(f"❌ Split forward failed: {forward_results}")
-                                # Don't process payment if forward failed (logged for debugging)
+                                # Mark payment as 'failed' instead of leaving in 'processing' state
+                                try:
+                                    conn2 = get_db_connection()
+                                    c2 = conn2.cursor()
+                                    c2.execute("""
+                                        UPDATE pending_sol_payments 
+                                        SET status = 'failed'
+                                        WHERE payment_id = ?
+                                    """, (payment_id,))
+                                    conn2.commit()
+                                    conn2.close()
+                                    logger.warning(f"⚠️ Payment {payment_id} marked as failed - manual intervention needed")
+                                except Exception as mark_error:
+                                    logger.error(f"Error marking payment as failed: {mark_error}")
                                 continue
-                            
-                            # Restart atomic transaction after successful forwarding
-                            c.execute("BEGIN IMMEDIATE")
-                            
-                            # Re-check again after forwarding (another race condition check)
-                            c.execute("""
-                                SELECT signature FROM processed_sol_transactions 
-                                WHERE signature = ?
-                            """, (tx_signature,))
-                            
-                            if c.fetchone():
-                                logger.warning(f"Transaction {tx_signature} was processed during forwarding, skipping")
-                                c.execute("ROLLBACK")
-                                continue
+                        
+                        # Start new atomic transaction for final processing
+                        c.execute("BEGIN IMMEDIATE")
+                        
+                        # Re-check if transaction was processed
+                        c.execute("""
+                            SELECT signature FROM processed_sol_transactions 
+                            WHERE signature = ?
+                        """, (tx_signature,))
+                        
+                        if c.fetchone():
+                            logger.warning(f"Transaction {tx_signature} was processed during forwarding, skipping")
+                            c.execute("ROLLBACK")
+                            continue
                         
                         # Mark transaction as processed (atomic with payment confirmation)
                         c.execute("""
