@@ -686,12 +686,26 @@ def main() -> None:
         logger.info("Telegram application started (webhook mode).")
         
         # Start SOL payment monitoring in background
+        logger.info("🔧 Attempting to start SOL payment monitoring...")
         try:
             from sol_payment import process_pending_sol_payments
-            asyncio.create_task(process_pending_sol_payments(application))
-            logger.info("🚀 Started SOL payment monitoring service")
+            task = asyncio.create_task(process_pending_sol_payments(application))
+            logger.info(f"🚀 SOL payment monitoring task created: {task}")
+            
+            # Give it a moment to initialize
+            await asyncio.sleep(2)
+            
+            if task.done():
+                # Task already finished/crashed
+                try:
+                    task.result()  # This will raise the exception if it crashed
+                except Exception as task_err:
+                    logger.error(f"❌ SOL monitoring task crashed immediately: {task_err}", exc_info=True)
+            else:
+                logger.info("✅ SOL payment monitoring is running")
+                
         except Exception as e:
-            logger.error(f"Failed to start SOL payment monitoring: {e}", exc_info=True)
+            logger.error(f"❌ Failed to start SOL payment monitoring: {e}", exc_info=True)
         
         port = int(os.environ.get("PORT", 10000))
         flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=port, debug=False), daemon=True)

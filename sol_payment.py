@@ -89,6 +89,8 @@ def init_sol_config():
         logger.warning("⚠️ SOL_MIDDLEMAN_PRIVATE_KEY not set. Split payments will not work!")
     
     # Initialize Solana RPC client
+    global SOLANA_RPC_URL, solana_client  # Must declare as global to modify!
+    
     # Validate RPC URL format
     if not SOLANA_RPC_URL.startswith(('http://', 'https://')):
         logger.error(f"❌ Invalid SOLANA_RPC_URL: '{SOLANA_RPC_URL}' - must start with http:// or https://")
