@@ -34,6 +34,9 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
+# Global lock to prevent concurrent split forwards (race conditions)
+_split_forward_lock = asyncio.Lock()
+
 # Will be imported from utils after configuration
 SOL_WALLET1_ADDRESS = None
 SOL_WALLET2_ADDRESS = None
@@ -547,11 +550,19 @@ async def forward_split_payment(
 ) -> Dict[str, bool]:
     """
     Forward payment from middleman wallet to final wallets (20% to W1, 80% to W2).
+    Uses a lock to prevent concurrent forwards from causing race conditions.
     
     Returns:
         Dict with success status for each wallet
     """
-    logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL")
+    # CRITICAL: Acquire lock to prevent concurrent forwards depleting the same balance
+    async with _split_forward_lock:
+        return await _forward_split_payment_locked(payment_id, total_sol_amount, source_signature)
+
+
+async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decimal, source_signature: str) -> Dict[str, bool]:
+    """Internal function that does the actual forwarding. Called within lock."""
+    logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL (LOCK ACQUIRED)")
     
     # Solana transaction fees: Each transfer costs ~0.000005 SOL
     # The fee is deducted from the sender's balance IN ADDITION to the transfer amount
