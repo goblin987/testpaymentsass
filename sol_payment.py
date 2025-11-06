@@ -934,12 +934,15 @@ async def check_pending_payments(context):
     conn = None
     try:
         conn = get_db_connection()
+        # Set busy timeout on main connection to prevent blocking
+        conn.execute("PRAGMA busy_timeout = 5000")  # 5 second timeout
         c = conn.cursor()
         
-        # First, recover any stuck 'processing' payments (stuck for >5 minutes)
+        # First, recover any stuck 'processing' payments (stuck for >2 minutes)
         # This handles cases where the process crashed during payment processing
+        # Reduced from 5 to 2 minutes for faster recovery from lock issues
         logger.debug("🔄 Checking for stuck 'processing' payments...")
-        five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        two_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
         
         # First, get details of stuck payments before updating
         c.execute("""
@@ -947,7 +950,7 @@ async def check_pending_payments(context):
             FROM pending_sol_payments 
             WHERE status = 'processing' 
             AND created_at < ?
-        """, (five_min_ago,))
+        """, (two_min_ago,))
         stuck_payments = c.fetchall()
         
         if stuck_payments:
@@ -961,7 +964,7 @@ async def check_pending_payments(context):
             SET status = 'pending'
             WHERE status = 'processing' 
             AND created_at < ?
-        """, (five_min_ago,))
+        """, (two_min_ago,))
         
         recovered = c.rowcount
         if recovered > 0:
@@ -1126,84 +1129,127 @@ async def check_pending_payments(context):
                     logger.info(f"  🔐 [LOCK] Attempting to acquire payment lock...")
                     payment_locked = False
                     lock_start_time = time.time()
-                    for attempt in range(3):  # Try 3 times
+                    lock_conn = None
+                    
+                    for attempt in range(5):  # Try 5 times (increased from 3)
                         try:
-                            logger.debug(f"     Attempt {attempt + 1}/3: Opening lock connection...")
+                            logger.debug(f"     Attempt {attempt + 1}/5: Opening lock connection...")
                             lock_conn = get_db_connection()
-                            lock_conn.execute("PRAGMA busy_timeout = 5000")  # 5 second timeout
+                            # Set timeout BEFORE any operations
+                            lock_conn.execute("PRAGMA busy_timeout = 10000")  # 10 second timeout (increased)
                             lock_c = lock_conn.cursor()
-                            logger.debug(f"     Attempt {attempt + 1}/3: Starting transaction with BEGIN IMMEDIATE...")
+                            
+                            logger.debug(f"     Attempt {attempt + 1}/5: Starting transaction with BEGIN IMMEDIATE...")
                             lock_c.execute("BEGIN IMMEDIATE")
                             
-                            # Check if transaction already processed (double-check race condition protection)
-                            logger.debug(f"     Attempt {attempt + 1}/3: Double-checking TX not already processed...")
-                            lock_c.execute("""
-                                SELECT signature FROM processed_sol_transactions 
-                                WHERE signature = ?
-                            """, (tx_signature,))
-                            
-                            if lock_c.fetchone():
-                                logger.warning(f"     ⚠️ [LOCK] TX {tx_signature[:16]}... was processed by another thread during lock acquisition")
+                            try:
+                                # Check if transaction already processed (double-check race condition protection)
+                                logger.debug(f"     Attempt {attempt + 1}/5: Double-checking TX not already processed...")
+                                lock_c.execute("""
+                                    SELECT signature FROM processed_sol_transactions 
+                                    WHERE signature = ?
+                                """, (tx_signature,))
+                                
+                                if lock_c.fetchone():
+                                    logger.warning(f"     ⚠️ [LOCK] TX {tx_signature[:16]}... was processed by another thread during lock acquisition")
+                                    lock_conn.rollback()
+                                    break  # Exit retry loop, move to next TX
+                                logger.debug(f"     Attempt {attempt + 1}/5: ✅ TX still unprocessed")
+                                
+                                # Mark payment as 'processing' immediately (atomic status change)
+                                logger.debug(f"     Attempt {attempt + 1}/5: Updating payment status to 'processing'...")
+                                lock_c.execute("""
+                                    UPDATE pending_sol_payments 
+                                    SET status = 'processing'
+                                    WHERE payment_id = ? AND status = 'pending'
+                                """, (payment_id,))
+                                
+                                if lock_c.rowcount == 0:
+                                    logger.warning(f"     ⚠️ [LOCK] Payment {payment_id} status already changed (another thread acquired lock first)")
+                                    lock_conn.rollback()
+                                    break  # Exit retry loop, move to next TX
+                                logger.debug(f"     Attempt {attempt + 1}/5: ✅ Status updated to 'processing' (rowcount={lock_c.rowcount})")
+                                
+                                # Commit the lock
+                                logger.debug(f"     Attempt {attempt + 1}/5: Committing lock transaction...")
+                                lock_conn.commit()
+                                lock_duration = time.time() - lock_start_time
+                                logger.info(f"  ✅ [LOCK] Payment {payment_id} LOCKED for processing (attempt {attempt + 1}, duration: {lock_duration:.3f}s)")
+                                payment_locked = True
+                                # Close connection on success
                                 lock_conn.close()
-                                break  # Exit retry loop, move to next TX
-                            logger.debug(f"     Attempt {attempt + 1}/3: ✅ TX still unprocessed")
-                            
-                            # Mark payment as 'processing' immediately (atomic status change)
-                            logger.debug(f"     Attempt {attempt + 1}/3: Updating payment status to 'processing'...")
-                            lock_c.execute("""
-                                UPDATE pending_sol_payments 
-                                SET status = 'processing'
-                                WHERE payment_id = ? AND status = 'pending'
-                            """, (payment_id,))
-                            
-                            if lock_c.rowcount == 0:
-                                logger.warning(f"     ⚠️ [LOCK] Payment {payment_id} status already changed (another thread acquired lock first)")
-                                lock_conn.close()
-                                break  # Exit retry loop, move to next TX
-                            logger.debug(f"     Attempt {attempt + 1}/3: ✅ Status updated to 'processing' (rowcount={lock_c.rowcount})")
-                            
-                            # Commit the lock
-                            logger.debug(f"     Attempt {attempt + 1}/3: Committing lock transaction...")
-                            lock_conn.commit()
-                            lock_conn.close()
-                            lock_duration = time.time() - lock_start_time
-                            logger.info(f"  ✅ [LOCK] Payment {payment_id} LOCKED for processing (attempt {attempt + 1}, duration: {lock_duration:.3f}s)")
-                            payment_locked = True
-                            break  # Success, exit retry loop
+                                lock_conn = None
+                                break  # Success, exit retry loop
+                                
+                            except Exception as inner_error:
+                                # Rollback on any error within transaction
+                                logger.error(f"     ❌ [LOCK] Error within transaction on attempt {attempt + 1}: {inner_error}")
+                                lock_conn.rollback()
+                                raise  # Re-raise to outer exception handler
                             
                         except sqlite3.OperationalError as lock_error:
+                            error_msg = str(lock_error).lower()
                             logger.warning(f"     ⚠️ [LOCK] OperationalError on attempt {attempt + 1}: {lock_error}")
-                            if 'lock_conn' in locals():
+                            
+                            # Always rollback and close connection on error
+                            if lock_conn:
+                                try:
+                                    lock_conn.rollback()
+                                except:
+                                    pass
                                 try:
                                     lock_conn.close()
                                 except:
                                     pass
+                                lock_conn = None
                             
-                            if "locked" in str(lock_error).lower() and attempt < 2:
-                                # Database locked, retry after brief delay
-                                retry_delay = 0.5 * (attempt + 1)
-                                logger.warning(f"     ⏳ [LOCK] Database locked, retrying in {retry_delay}s...")
-                                await asyncio.sleep(retry_delay)  # Exponential backoff
+                            if "locked" in error_msg and attempt < 4:
+                                # Database locked, retry after exponential backoff
+                                retry_delay = 1.0 * (2 ** attempt)  # Exponential: 1s, 2s, 4s, 8s
+                                logger.warning(f"     ⏳ [LOCK] Database locked, retrying in {retry_delay:.1f}s...")
+                                await asyncio.sleep(retry_delay)
                                 continue
                             else:
                                 logger.error(f"     ❌ [LOCK] Fatal error on attempt {attempt + 1}: {lock_error}")
-                                if attempt == 2:
-                                    logger.error(f"     ❌ [LOCK] All 3 attempts exhausted")
-                                    break
+                                if attempt == 4:
+                                    logger.error(f"     ❌ [LOCK] All 5 attempts exhausted")
+                                break
+                                
                         except Exception as lock_error:
                             logger.error(f"     ❌ [LOCK] Unexpected error on attempt {attempt + 1}: {lock_error}", exc_info=True)
-                            if 'lock_conn' in locals():
+                            # Always rollback and close connection on error
+                            if lock_conn:
+                                try:
+                                    lock_conn.rollback()
+                                except:
+                                    pass
                                 try:
                                     lock_conn.close()
                                 except:
                                     pass
+                                lock_conn = None
                             break
+                        finally:
+                            # Ensure connection is closed
+                            if lock_conn:
+                                try:
+                                    # Only close if transaction is not active
+                                    lock_conn.close()
+                                except:
+                                    pass
+                                lock_conn = None
                     
                     # If we couldn't lock the payment, skip to next transaction
                     if not payment_locked:
                         total_lock_duration = time.time() - lock_start_time
-                        logger.error(f"  ❌ [LOCK] Failed to acquire lock for payment {payment_id} after 3 attempts ({total_lock_duration:.3f}s total)")
+                        logger.error(f"  ❌ [LOCK] Failed to acquire lock for payment {payment_id} after 5 attempts ({total_lock_duration:.3f}s total)")
                         logger.error(f"     Payment will be retried in next monitoring cycle (60s)")
+                        # Ensure connection is closed even if we failed
+                        if lock_conn:
+                            try:
+                                lock_conn.close()
+                            except:
+                                pass
                         continue
                     
                     # If payment went to middleman, forward it (outside of any transaction)
