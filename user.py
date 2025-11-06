@@ -20,16 +20,15 @@ from utils import (
     CITIES, DISTRICTS, PRODUCT_TYPES, THEMES, LANGUAGES, BOT_MEDIA, ADMIN_ID, BASKET_TIMEOUT, MIN_DEPOSIT_EUR,
     format_currency, get_progress_bar, send_message_with_retry, format_discount_value,
     clear_expired_basket, fetch_last_purchases, get_user_status, fetch_reviews,
-    NOWPAYMENTS_API_KEY, # Check if NOWPayments is configured
-    get_db_connection, MEDIA_DIR, # Import helper and MEDIA_DIR
-    DEFAULT_PRODUCT_EMOJI, # Import default emoji
-    load_active_welcome_message, # <<< Import welcome message loader (though we'll modify its usage)
-    DEFAULT_WELCOME_MESSAGE, # <<< Import default welcome message fallback
-    _get_lang_data, # <<< IMPORT THE HELPER FROM UTILS >>>
-    _unreserve_basket_items, # <<< IMPORT UNRESERVE HELPER >>>
-    is_primary_admin, is_secondary_admin, is_any_admin, # Admin helper functions
-    SECONDARY_ADMIN_IDS, is_user_banned, # Import ban check helper
-    update_user_broadcast_status # Import broadcast tracking helper
+    get_db_connection, MEDIA_DIR,
+    DEFAULT_PRODUCT_EMOJI,
+    load_active_welcome_message,
+    DEFAULT_WELCOME_MESSAGE,
+    _get_lang_data,
+    _unreserve_basket_items,
+    is_primary_admin, is_secondary_admin, is_any_admin,
+    SECONDARY_ADMIN_IDS, is_user_banned,
+    update_user_broadcast_status
 )
 import json # <<< Make sure json is imported
 import payment # <<< Make sure payment module is imported
@@ -2390,12 +2389,6 @@ async def handle_refill(update: Update, context: ContextTypes.DEFAULT_TYPE, para
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     lang, lang_data = _get_lang_data(context)
-
-    if not NOWPAYMENTS_API_KEY:
-        crypto_disabled_msg = lang_data.get("crypto_payment_disabled", "Top Up is currently disabled.")
-        await query.answer(crypto_disabled_msg, show_alert=True)
-        logger.warning(f"User {user_id} tried to refill, but NOWPAYMENTS_API_KEY is not set.")
-        return
 
     context.user_data['state'] = 'awaiting_refill_amount'
     logger.info(f"User {user_id} initiated refill process. State -> awaiting_refill_amount.")

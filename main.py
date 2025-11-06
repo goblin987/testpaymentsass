@@ -41,7 +41,6 @@ from utils import (
     clean_expired_pending_payments,
     get_expired_payments_for_notification,
     clean_abandoned_reservations,
-    get_crypto_price_eur,
     get_first_primary_admin_id, # Admin helper for notifications
     is_user_banned  # Import ban check helper
 )
