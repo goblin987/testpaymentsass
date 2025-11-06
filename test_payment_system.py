@@ -18,7 +18,8 @@ from typing import List, Dict
 sys.path.insert(0, '.')
 
 # Set required environment variables BEFORE importing anything
-os.environ.setdefault('TOKEN', 'TEST_TOKEN_FOR_TESTING_ONLY')
+# Use properly formatted fake Telegram token (format: bot_id:token_string)
+os.environ.setdefault('TOKEN', '999999999:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw')  # Fake but valid format
 os.environ.setdefault('ADMIN_ID', '999999999')
 os.environ.setdefault('SOL_WALLET1_ADDRESS', 'GxTestWallet1111111111111111111111111111111111')
 os.environ.setdefault('SOL_WALLET2_ADDRESS', 'GxTestWallet2222222222222222222222222222222222')
