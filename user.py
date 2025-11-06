@@ -1706,7 +1706,7 @@ async def handle_basket_discount_code_message(update: Update, context: ContextTy
 
     if not entered_code:
         await send_message_with_retry(context.bot, chat_id, lang_data.get("no_code_entered", "No code entered."), parse_mode=None)
-        await _show_crypto_choices_for_basket(update, context)
+        await _create_sol_payment_for_basket(update, context)
         return
 
     # SECURITY: Use atomic validation to prevent race conditions and multiple uses
@@ -1730,7 +1730,7 @@ async def handle_basket_discount_code_message(update: Update, context: ContextTy
     except Exception as e: logger.warning(f"Could not delete user's discount code message: {e}")
 
     await send_message_with_retry(context.bot, chat_id, feedback_msg, parse_mode=None)
-    await _show_crypto_choices_for_basket(update, context)
+    await _create_sol_payment_for_basket(update, context)
 
 
 # --- NEW: Handler to Skip Discount in Basket Pay Flow (SOL Payment) ---
@@ -2578,10 +2578,10 @@ async def handle_single_item_discount_code_message(update: Update, context: Cont
         context.user_data.pop('single_item_pay_discount_code', None)
         context.user_data.pop('single_item_pay_back_params', None)
     else:
-        context.user_data['basket_pay_snapshot'] = snapshot # Use the general basket_pay keys for _show_crypto_choices
+        context.user_data['basket_pay_snapshot'] = snapshot # Use the general basket_pay keys for SOL payment
         context.user_data['basket_pay_total_eur'] = float(final_total_decimal)
         context.user_data['basket_pay_discount_code'] = discount_code_to_use
-        await _show_crypto_choices_for_basket(update, context, edit_message=False)
+        await _create_sol_payment_for_basket(update, context)
 
 # --- NEW: Handler to Ask for Discount Code in Single Item Pay Flow ---
 async def handle_apply_discount_single_pay(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
@@ -2633,4 +2633,4 @@ async def handle_skip_discount_single_pay(update: Update, context: ContextTypes.
     context.user_data['single_item_pay_discount_code'] = None # Ensure no discount code is carried forward
     proceeding_msg = lang_data.get("proceeding_to_payment_answer", "Proceeding to payment options...")
     await query.answer(proceeding_msg)
-    await _show_crypto_choices_for_basket(update, context, edit_message=True)
+    await _create_sol_payment_for_basket(update, context)
