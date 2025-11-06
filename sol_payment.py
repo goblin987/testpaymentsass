@@ -316,12 +316,22 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         transactions = []
         
         # Process each signature to get transaction details
+        processed_count = 0
+        VERBOSE_LIMIT = 3  # Only log details for first 3 transactions
+        
         for sig_info in sig_response.value:
             signature = str(sig_info.signature)
             block_time = sig_info.block_time
+            processed_count += 1
+            verbose = processed_count <= VERBOSE_LIMIT
+            
+            if verbose:
+                logger.info(f"Processing TX #{processed_count}/{len(sig_response.value)}: {signature[:16]}...")
             
             # Skip if transaction failed
             if sig_info.err:
+                if verbose:
+                    logger.info(f"  ⏭️ Skipping failed TX")
                 continue
             
             try:
@@ -337,47 +347,88 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
                 tx_response = await asyncio.to_thread(fetch_transaction)
                 
                 if not tx_response or not tx_response.value:
+                    if verbose:
+                        logger.info(f"  ❌ No transaction data returned")
                     continue
                 
                 tx_data = tx_response.value
                 
                 # Parse transaction to find SOL transfers to our wallet
-                if tx_data.transaction and tx_data.transaction.meta:
-                    meta = tx_data.transaction.meta
+                if not (tx_data.transaction and tx_data.transaction.meta):
+                    if verbose:
+                        logger.info(f"  ❌ Missing transaction or meta")
+                    continue
+                
+                meta = tx_data.transaction.meta
+                
+                # Check pre and post balances to find incoming SOL
+                if not hasattr(tx_data.transaction.transaction, 'message'):
+                    if verbose:
+                        logger.info(f"  ❌ No message attribute")
+                    continue
+                
+                message = tx_data.transaction.transaction.message
+                account_keys = message.account_keys
+                
+                if verbose:
+                    logger.info(f"  📋 Account keys: {len(account_keys)}, Pre/Post balances: {len(meta.pre_balances) if meta.pre_balances else 0}/{len(meta.post_balances) if meta.post_balances else 0}")
+                
+                # Find our wallet's index in the account keys
+                our_index = None
+                for idx, key in enumerate(account_keys):
+                    key_str = str(key.pubkey) if hasattr(key, 'pubkey') else str(key)
+                    if key_str == wallet_address:
+                        our_index = idx
+                        if verbose:
+                            logger.info(f"  ✅ Found our wallet at index {idx}")
+                        break
+                
+                if our_index is None:
+                    if verbose:
+                        logger.info(f"  ❌ Our wallet NOT in account keys - skipping")
+                    continue
+                
+                if not (meta.pre_balances and meta.post_balances):
+                    if verbose:
+                        logger.info(f"  ❌ Missing pre or post balances")
+                    continue
+                
+                if our_index >= len(meta.pre_balances) or our_index >= len(meta.post_balances):
+                    if verbose:
+                        logger.info(f"  ❌ Index {our_index} out of range")
+                    continue
+                
+                pre_balance = meta.pre_balances[our_index]
+                post_balance = meta.post_balances[our_index]
+                
+                pre_sol = Decimal(pre_balance) / Decimal('1000000000')
+                post_sol = Decimal(post_balance) / Decimal('1000000000')
+                
+                if verbose:
+                    logger.info(f"  💸 Balance: {pre_sol:.6f} → {post_sol:.6f} SOL")
+                
+                # Check if this is an incoming transfer (balance increased)
+                if post_balance > pre_balance:
+                    lamports_received = post_balance - pre_balance
+                    sol_amount = Decimal(lamports_received) / Decimal('1000000000')
                     
-                    # Check pre and post balances to find incoming SOL
-                    if hasattr(tx_data.transaction.transaction, 'message'):
-                        message = tx_data.transaction.transaction.message
-                        account_keys = message.account_keys
-                        
-                        # Find our wallet's index in the account keys
-                        our_index = None
-                        for idx, key in enumerate(account_keys):
-                            key_str = str(key.pubkey) if hasattr(key, 'pubkey') else str(key)
-                            if key_str == wallet_address:
-                                our_index = idx
-                                break
-                        
-                        if our_index is not None and meta.pre_balances and meta.post_balances:
-                            pre_balance = meta.pre_balances[our_index]
-                            post_balance = meta.post_balances[our_index]
-                            
-                            # Check if this is an incoming transfer (balance increased)
-                            if post_balance > pre_balance:
-                                lamports_received = post_balance - pre_balance
-                                sol_amount = Decimal(lamports_received) / Decimal('1000000000')
-                                
-                                transactions.append({
-                                    'signature': signature,
-                                    'timestamp': block_time,
-                                    'amount_sol': sol_amount,
-                                    'confirmed': True
-                                })
+                    logger.info(f"✅ INCOMING TX: {signature[:16]}... +{sol_amount:.6f} SOL")
+                    
+                    transactions.append({
+                        'signature': signature,
+                        'timestamp': block_time,
+                        'amount_sol': sol_amount,
+                        'confirmed': True
+                    })
+                else:
+                    if verbose:
+                        logger.info(f"  ⬇️ Not incoming (balance decreased or unchanged)")
             
             except Exception as tx_error:
-                logger.debug(f"Could not process transaction {signature[:8]}...: {tx_error}")
+                logger.warning(f"⚠️ Error processing TX {signature[:16]}...: {tx_error}")
                 continue
         
+        logger.info(f"📊 Processed {processed_count} transactions, found {len(transactions)} incoming")
         return transactions
         
     except Exception as e:
