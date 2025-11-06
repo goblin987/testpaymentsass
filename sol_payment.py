@@ -242,8 +242,8 @@ async def create_sol_payment(
         logger.debug(f"    With 1% buffer: {sol_amount:.6f} SOL")
         
         # Add random offset to make each payment unique (prevents collision when multiple users buy same item)
-        # Offset range: 0.000001 to 0.000099 SOL (~$0.0001 to $0.01)
-        random_offset = Decimal(str(random.randint(1, 99))) / Decimal('1000000')
+        # Offset range: 0.000001 to 0.009999 SOL (9999 possible values for better uniqueness)
+        random_offset = Decimal(str(random.randint(1, 9999))) / Decimal('1000000')
         sol_amount = sol_amount + random_offset
         logger.info(f"  ✅ Final amount: {sol_amount:.6f} SOL (base: {sol_amount_base:.6f}, buffer: +1%, offset: +{random_offset:.6f})")
         
