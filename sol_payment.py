@@ -794,11 +794,10 @@ async def check_pending_payments(context):
                         logger.warning(f"Transaction {tx_signature} already used for different payment")
                         continue
                     
-                    # Verify transaction is confirmed
-                    tx_verified = await verify_sol_transaction(tx_signature)
-                    
-                    if not (tx_verified and tx_verified.get('confirmed')):
-                        logger.warning(f"Transaction {tx_signature} not confirmed yet")
+                    # Transaction is already confirmed (we only get confirmed txs from check_wallet_transactions)
+                    # The 'confirmed' field in tx dict indicates it passed all checks
+                    if not tx.get('confirmed'):
+                        logger.warning(f"Transaction {tx_signature} not confirmed")
                         continue
                     
                     logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
