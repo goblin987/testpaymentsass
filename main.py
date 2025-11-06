@@ -592,135 +592,7 @@ async def clean_abandoned_reservations_job_wrapper(context: ContextTypes.DEFAULT
         logger.error(f"Error in background job clean_abandoned_reservations_job: {e}", exc_info=True)
 
 
-async def payment_recovery_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
-    """BULLETPROOF: Wrapper for payment recovery job"""
-    logger.debug("Running background job: payment_recovery_job")
-    try:
-        from utils import run_payment_recovery_job
-        await asyncio.to_thread(run_payment_recovery_job)
-    except Exception as e:
-        logger.error(f"❌ BULLETPROOF: Error in payment recovery job: {e}", exc_info=True)
-
-
-async def send_timeout_notifications(context: ContextTypes.DEFAULT_TYPE, user_notifications: list):
-    """Send timeout notifications to users whose payments have expired."""
-    for user_notification in user_notifications:
-        user_id = user_notification['user_id']
-        user_lang = user_notification['language']
-        
-        try:
-            lang_data = LANGUAGES.get(user_lang, LANGUAGES['en'])
-            notification_msg = lang_data.get("payment_timeout_notification", 
-                "⏰ Payment Timeout: Your payment for basket items has expired after 2 hours. Reserved items have been released.")
-            
-            await send_message_with_retry(context.bot, user_id, notification_msg, parse_mode=None)
-            logger.info(f"Sent payment timeout notification to user {user_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to send timeout notification to user {user_id}: {e}")
-
-
-async def retry_purchase_finalization(user_id: int, basket_snapshot: list, discount_code_used: str | None, payment_id: str, context: ContextTypes.DEFAULT_TYPE, max_retries: int = 3):
-    """Retry purchase finalization with exponential backoff in case of failures."""
-    import payment
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Retrying purchase finalization for payment {payment_id}, attempt {attempt + 1}/{max_retries}")
-            
-            # Wait with exponential backoff: 5s, 15s, 45s
-            if attempt > 0:
-                wait_time = 5 * (3 ** attempt)
-                logger.info(f"Waiting {wait_time} seconds before retry attempt {attempt + 1}")
-                await asyncio.sleep(wait_time)
-            
-            # Retry the finalization
-            purchase_finalized = await payment.process_successful_crypto_purchase(
-                user_id, basket_snapshot, discount_code_used, payment_id, context
-            )
-            
-            if purchase_finalized:
-                logger.info(f"✅ SUCCESS: Purchase finalization retry succeeded for payment {payment_id} on attempt {attempt + 1}")
-                # Remove the pending deposit on success
-                await asyncio.to_thread(remove_pending_deposit, payment_id, trigger="retry_success")
-                return True
-            else:
-                logger.warning(f"Purchase finalization retry failed for payment {payment_id} on attempt {attempt + 1}")
-                
-        except Exception as e:
-            logger.error(f"Exception during purchase finalization retry for payment {payment_id}, attempt {attempt + 1}: {e}", exc_info=True)
-    
-    # All retries failed
-    logger.critical(f"🚨 CRITICAL: All {max_retries} retry attempts failed for purchase finalization payment {payment_id} user {user_id}")
-    
-    # Send critical alert to admin
-    if get_first_primary_admin_id() and telegram_app:
-        try:
-            await send_message_with_retry(
-                telegram_app.bot, 
-                ADMIN_ID, 
-                f"🚨 CRITICAL FAILURE: Purchase {payment_id} for user {user_id} FAILED after {max_retries} retries. "
-                f"Payment was successful but finalization completely failed. URGENT MANUAL INTERVENTION REQUIRED!",
-                parse_mode=None
-            )
-        except Exception as notify_error:
-            logger.error(f"Failed to notify admin about critical purchase failure: {notify_error}")
-    
-    return False
-
-
-# --- Flask Webhook Routes ---
-# NowPayments webhook removed - using direct Solana payments now
-
-# --- Improved Payment Processing with Retry ---
-async def process_payment_with_retry(user_id: int, basket_snapshot: list, discount_code_used: str | None, payment_id: str, context: ContextTypes.DEFAULT_TYPE, max_retries: int = 3):
-    """Process payment with automatic retry and better error handling"""
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Processing payment {payment_id}, attempt {attempt + 1}/{max_retries}")
-            
-            # First, verify the payment status with NOWPayments
-            payment_status = await payment.check_payment_status(payment_id)
-            if payment_status.get('error'):
-                logger.error(f"Failed to verify payment status for {payment_id}: {payment_status}")
-                if attempt == max_retries - 1:
-                    return False
-                await asyncio.sleep(5 * (attempt + 1))  # Exponential backoff
-                continue
-            
-            # Check if payment is actually confirmed
-            if payment_status.get('payment_status') not in ['finished', 'confirmed', 'partially_paid']:
-                logger.warning(f"Payment {payment_id} not confirmed yet, status: {payment_status.get('payment_status')}")
-                if attempt == max_retries - 1:
-                    return False
-                await asyncio.sleep(10 * (attempt + 1))
-                continue
-            
-            # Process the payment
-            success = await payment.process_successful_crypto_purchase(
-                user_id, basket_snapshot, discount_code_used, payment_id, context
-            )
-            
-            if success:
-                logger.info(f"✅ Payment {payment_id} processed successfully on attempt {attempt + 1}")
-                return True
-            else:
-                logger.warning(f"Payment processing failed for {payment_id} on attempt {attempt + 1}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5 * (attempt + 1))
-                
-        except Exception as e:
-            logger.error(f"Exception during payment processing {payment_id}, attempt {attempt + 1}: {e}", exc_info=True)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(5 * (attempt + 1))
-    
-    # All retries failed
-    logger.critical(f"🚨 CRITICAL: All {max_retries} attempts failed for payment {payment_id}")
-    
-    # Admin notification removed to reduce spam
-    
-    return False
+# NowPayments recovery functions removed - using direct Solana blockchain monitoring
 
 # NowPayments webhook route removed - using direct Solana blockchain monitoring
 
@@ -797,8 +669,6 @@ def main() -> None:
             # Abandoned reservation cleanup job (runs every 3 minutes for faster response)
             job_queue.run_repeating(clean_abandoned_reservations_job_wrapper, interval=timedelta(minutes=3), first=timedelta(minutes=2), name="clean_abandoned")
             
-            # BULLETPROOF: Payment recovery job (runs every 5 minutes to recover failed payments)
-            job_queue.run_repeating(payment_recovery_job_wrapper, interval=timedelta(minutes=5), first=timedelta(minutes=3), name="payment_recovery")
             logger.info("Background jobs setup complete (basket cleanup + payment timeout + abandoned reservations).")
         else: logger.warning("Job Queue is not available. Background jobs skipped.")
     else: logger.warning("BASKET_TIMEOUT is not positive. Skipping background job setup.")
