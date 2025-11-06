@@ -553,18 +553,29 @@ async def forward_split_payment(
     """
     logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL")
     
-    # Calculate split amounts (reserve for fees + rent-exempt minimum)
-    # Solana rent-exempt minimum: ~0.00089088 SOL + 2 tx fees (~0.00001 SOL) + buffer
-    fee_reserve = Decimal('0.002')  # Reserve 0.002 SOL for fees and rent
+    # Check middleman wallet has enough balance for fees
+    # Minimum balance needed: rent-exempt (~0.00089088 SOL) + 2 tx fees (~0.00001 SOL)
+    MIN_RESERVE_BALANCE = Decimal('0.001')  # Minimum balance to keep in middleman wallet
     
-    if total_sol_amount <= fee_reserve:
-        logger.error(f"❌ Payment amount {total_sol_amount} SOL too small to forward after fees")
-        return {'wallet1': False, 'wallet2': False}
+    try:
+        balance_response = solana_client.get_balance(SOL_MIDDLEMAN_ADDRESS)
+        current_balance = Decimal(balance_response.value) / Decimal(1_000_000_000)
+        remaining_after_split = current_balance - total_sol_amount
+        
+        if remaining_after_split < MIN_RESERVE_BALANCE:
+            logger.error(f"❌ Insufficient middleman balance! Current: {current_balance} SOL, After split: {remaining_after_split} SOL, Need: {MIN_RESERVE_BALANCE} SOL")
+            logger.error(f"⚠️ Please fund middleman wallet with at least {MIN_RESERVE_BALANCE} SOL!")
+            return {'wallet1': False, 'wallet2': False}
+        
+        logger.info(f"💰 Middleman balance OK: {current_balance} SOL (remaining after: {remaining_after_split} SOL)")
+    except Exception as e:
+        logger.error(f"❌ Failed to check middleman balance: {e}")
+        # Continue anyway - transaction will fail if insufficient
     
-    distributable = total_sol_amount - fee_reserve
-    
-    amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-    amount_wallet2 = (distributable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+    # Split the FULL amount 20/80 (fees are paid by middleman wallet's reserve balance)
+    # Buyer gets 100% of their payment value distributed
+    amount_wallet1 = (total_sol_amount * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+    amount_wallet2 = (total_sol_amount * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
     
     logger.info(f"💰 Split: {amount_wallet1} SOL → Asmenine (20%), {amount_wallet2} SOL → Kolegos (80%)")
     
