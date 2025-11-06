@@ -16,6 +16,7 @@ from typing import Optional, Dict, List
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction
 from solders.message import Message
@@ -337,8 +338,10 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
             try:
                 # Fetch full transaction details
                 def fetch_transaction():
+                    # Convert string signature to Signature object
+                    sig_obj = Signature.from_string(signature)
                     return solana_client.get_transaction(
-                        signature,
+                        sig_obj,
                         encoding="jsonParsed",
                         commitment=Confirmed,
                         max_supported_transaction_version=0
@@ -445,8 +448,10 @@ async def verify_sol_transaction(signature: str) -> Optional[Dict]:
     """
     try:
         def fetch_transaction():
+            # Convert string signature to Signature object
+            sig_obj = Signature.from_string(signature)
             response = solana_client.get_transaction(
-                signature,
+                sig_obj,
                 encoding="json",
                 commitment=Confirmed,
                 max_supported_transaction_version=0
