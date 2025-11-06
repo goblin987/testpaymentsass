@@ -598,9 +598,11 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     # Solana transaction fees: Each transfer costs ~0.000005 SOL
     # The fee is deducted from the sender's balance IN ADDITION to the transfer amount
     # Solana rent-exempt minimum: ~0.00089088 SOL
-    TX_FEE_ESTIMATE = Decimal('0.000005')  # Per transaction
+    # Using conservative estimate to handle network congestion
+    TX_FEE_ESTIMATE = Decimal('0.00001')  # Per transaction (2x typical for safety)
     TOTAL_FEES = TX_FEE_ESTIMATE * 2  # Two transactions (20% + 80%)
     MIN_RESERVE_BALANCE = Decimal('0.002')  # Permanent reserve: rent (~0.00089088) + buffer
+    MIN_FORWARDABLE = Decimal('0.000010')  # Minimum to forward (prevent dust transfers)
     
     logger.debug(f"  Constants: TX_FEE={TX_FEE_ESTIMATE:.6f}, TOTAL_FEES={TOTAL_FEES:.6f}, MIN_RESERVE={MIN_RESERVE_BALANCE:.6f}")
     
@@ -663,8 +665,21 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
         logger.info(f"     Before: {current_balance:.6f} SOL")
         logger.info(f"     After:  ~{predicted_balance:.6f} SOL (minus fees)")
         
+        # CRITICAL: Block if predicted balance would go below reserve
         if predicted_balance < MIN_RESERVE_BALANCE:
-            logger.error(f"  ⚠️ WARNING: Predicted balance ({predicted_balance:.6f}) below reserve ({MIN_RESERVE_BALANCE:.6f})!")
+            logger.error(f"  ❌ BLOCKED: Predicted balance ({predicted_balance:.6f}) below reserve ({MIN_RESERVE_BALANCE:.6f})!")
+            logger.error(f"     This forward would drain the wallet below rent-exempt minimum")
+            logger.error(f"     Forwardable amount must be reduced or wallet must be funded")
+            logger.error(f"  ⚠️ URGENT: Fund middleman wallet with at least {MIN_RESERVE_BALANCE - predicted_balance + Decimal('0.001'):.6f} SOL!")
+            return {'wallet1': False, 'wallet2': False}
+        
+        # Validate minimum forwardable amounts
+        if amount_wallet1 < MIN_FORWARDABLE or amount_wallet2 < MIN_FORWARDABLE:
+            logger.error(f"  ❌ BLOCKED: Split amounts below minimum forwardable ({MIN_FORWARDABLE:.6f} SOL)")
+            logger.error(f"     Asmenine (20%): {amount_wallet1:.6f} SOL {'✅' if amount_wallet1 >= MIN_FORWARDABLE else '❌ TOO SMALL'}")
+            logger.error(f"     Kolegos (80%):  {amount_wallet2:.6f} SOL {'✅' if amount_wallet2 >= MIN_FORWARDABLE else '❌ TOO SMALL'}")
+            logger.error(f"     Payment amount ({total_sol_amount:.6f} SOL) too small for split forwarding")
+            return {'wallet1': False, 'wallet2': False}
     
     except Exception as e:
         logger.error(f"❌ Failed to check middleman balance: {e}", exc_info=True)
@@ -715,6 +730,29 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
         # Small delay between transactions
         logger.debug(f"  ⏳ Waiting 1 second before second transfer...")
         await asyncio.sleep(1)
+        
+        # SAFETY CHECK: Verify wallet still has enough for second transfer + reserve
+        try:
+            logger.debug(f"  🔍 Rechecking middleman balance after first transfer...")
+            balance_response_after = solana_client.get_balance(middleman_pubkey)
+            balance_after_first = Decimal(balance_response_after.value) / Decimal(1_000_000_000)
+            logger.debug(f"     Balance after 1st TX: {balance_after_first:.6f} SOL")
+            
+            required_for_second = amount_wallet1 + TX_FEE_ESTIMATE + MIN_RESERVE_BALANCE
+            logger.debug(f"     Required for 2nd TX: {required_for_second:.6f} SOL (amount + fee + reserve)")
+            
+            if balance_after_first < required_for_second:
+                logger.error(f"  ❌ [FORWARD 2/2] Insufficient balance after first transfer!")
+                logger.error(f"     Current: {balance_after_first:.6f} SOL")
+                logger.error(f"     Needed: {required_for_second:.6f} SOL")
+                logger.error(f"     Shortfall: {required_for_second - balance_after_first:.6f} SOL")
+                logger.error(f"     PARTIAL SPLIT: Only Kolegos (80%) received funds")
+                # Don't attempt second transfer
+                return results
+            logger.debug(f"     ✅ Sufficient balance for second transfer")
+        except Exception as balance_check_err:
+            logger.warning(f"  ⚠️ Failed to recheck balance: {balance_check_err}")
+            logger.warning(f"     Proceeding with second transfer anyway...")
         
         # Forward to Asmenine (20%) - only if Kolegos succeeded
         logger.info(f"  📤 [FORWARD 2/2] Sending {amount_wallet1:.6f} SOL to Asmenine (20%)...")
