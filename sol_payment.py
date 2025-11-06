@@ -25,6 +25,7 @@ from solders.message import Message
 from solders.rpc.responses import GetLatestBlockhashResp
 from solana.rpc.api import Client as SolanaClient
 from solana.rpc.commitment import Confirmed
+from solana.rpc.types import TxOpts
 
 from utils import (
     get_db_connection, format_currency, LANGUAGES,
@@ -684,9 +685,10 @@ async def send_sol_transaction(
             transaction = Transaction([from_keypair], message, recent_blockhash)
             
             # Send transaction (transaction already signed, don't pass keypair again)
+            tx_opts = TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
             response = solana_client.send_transaction(
                 transaction,
-                opts={'skip_preflight': False, 'preflight_commitment': Confirmed}
+                opts=tx_opts
             )
             
             if response and response.value:
