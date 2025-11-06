@@ -566,48 +566,61 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     
     # Solana transaction fees: Each transfer costs ~0.000005 SOL
     # The fee is deducted from the sender's balance IN ADDITION to the transfer amount
-    # So we need to reserve some SOL for fees OR deduct fees from the split
+    # Solana rent-exempt minimum: ~0.00089088 SOL
     TX_FEE_ESTIMATE = Decimal('0.000005')  # Per transaction
     TOTAL_FEES = TX_FEE_ESTIMATE * 2  # Two transactions (20% + 80%)
-    MIN_RESERVE_BALANCE = Decimal('0.01')  # Permanent reserve for rent + buffer
+    MIN_RESERVE_BALANCE = Decimal('0.002')  # Permanent reserve: rent (~0.00089088) + buffer
     
-    # Check middleman wallet balance
+    # Check middleman wallet balance and calculate how much we can safely forward
     try:
         middleman_pubkey = Pubkey.from_string(SOL_MIDDLEMAN_ADDRESS)
         balance_response = solana_client.get_balance(middleman_pubkey)
         current_balance = Decimal(balance_response.value) / Decimal(1_000_000_000)
         logger.info(f"💰 Middleman wallet balance: {current_balance} SOL")
         
-        # Check if we have enough for fees + permanent reserve
-        required_total = total_sol_amount + TOTAL_FEES + MIN_RESERVE_BALANCE
+        # Calculate maximum we can forward while keeping the reserve
+        max_forwardable = current_balance - MIN_RESERVE_BALANCE - TOTAL_FEES
         
-        if current_balance < required_total:
-            logger.error(f"❌ Insufficient balance! Have: {current_balance} SOL, Need: {required_total} SOL")
-            logger.error(f"⚠️ Fund middleman wallet with at least {MIN_RESERVE_BALANCE} SOL as permanent reserve!")
-            
-            # FALLBACK: Deduct fees from payment amount
-            logger.warning(f"⚠️ FALLBACK: Deducting fees from payment amount")
-            distributable = total_sol_amount - TOTAL_FEES
-            if distributable <= 0:
-                logger.error(f"❌ Payment too small to cover fees!")
-                return {'wallet1': False, 'wallet2': False}
-            amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-            amount_wallet2 = (distributable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-            logger.info(f"💰 Split after fee deduction ({TOTAL_FEES} SOL): {amount_wallet1} SOL → Asmenine, {amount_wallet2} SOL → Kolegos")
+        if max_forwardable <= 0:
+            logger.error(f"❌ Middleman wallet balance too low to forward!")
+            logger.error(f"   Current: {current_balance} SOL")
+            logger.error(f"   Reserve needed: {MIN_RESERVE_BALANCE} SOL")
+            logger.error(f"   Fees needed: {TOTAL_FEES} SOL")
+            logger.error(f"⚠️ URGENT: Fund middleman wallet with at least 0.005 SOL!")
+            return {'wallet1': False, 'wallet2': False}
+        
+        # Determine how much to forward
+        if max_forwardable >= total_sol_amount:
+            # IDEAL: We can forward the full payment amount
+            forwardable = total_sol_amount
+            logger.info(f"✅ Can forward FULL amount ({forwardable} SOL) - reserve OK")
         else:
-            # We have enough balance - split FULL amount, fees paid by reserve
-            amount_wallet1 = (total_sol_amount * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-            amount_wallet2 = (total_sol_amount * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-            logger.info(f"💰 Split (fees from reserve): {amount_wallet1} SOL → Asmenine (20%), {amount_wallet2} SOL → Kolegos (80%)")
+            # FALLBACK: Forward only what we can while keeping reserve
+            forwardable = max_forwardable
+            logger.warning(f"⚠️ Can only forward {forwardable} SOL (not full {total_sol_amount} SOL)")
+            logger.warning(f"   Reason: Must keep {MIN_RESERVE_BALANCE} SOL reserve + {TOTAL_FEES} SOL fees")
+        
+        # Split the forwardable amount 20/80
+        amount_wallet1 = (forwardable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        amount_wallet2 = (forwardable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        
+        logger.info(f"💰 Split: {amount_wallet1} SOL → Asmenine (20%), {amount_wallet2} SOL → Kolegos (80%)")
+        logger.info(f"💰 After forward, wallet will have: ~{current_balance - forwardable - TOTAL_FEES} SOL")
     
     except Exception as e:
         logger.error(f"❌ Failed to check middleman balance: {e}", exc_info=True)
-        # FALLBACK: Deduct fees from payment
-        logger.warning(f"⚠️ FALLBACK: Deducting fees from payment amount")
-        distributable = total_sol_amount - TOTAL_FEES
-        amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-        amount_wallet2 = (distributable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
-        logger.info(f"💰 Split after fee deduction: {amount_wallet1} SOL → Asmenine, {amount_wallet2} SOL → Kolegos")
+        # FALLBACK: Can't check balance, so deduct small safety buffer from payment
+        logger.warning(f"⚠️ FALLBACK: Can't verify balance, deducting safety buffer")
+        safety_buffer = TOTAL_FEES + Decimal('0.001')  # Fees + small buffer for rent
+        forwardable = total_sol_amount - safety_buffer
+        
+        if forwardable <= 0:
+            logger.error(f"❌ Payment too small to forward with safety buffer!")
+            return {'wallet1': False, 'wallet2': False}
+        
+        amount_wallet1 = (forwardable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        amount_wallet2 = (forwardable * Decimal('0.80')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
+        logger.info(f"💰 Split with safety buffer: {amount_wallet1} SOL → Asmenine, {amount_wallet2} SOL → Kolegos")
     
     results = {'wallet1': False, 'wallet2': False}
     signatures = {'wallet1': None, 'wallet2': None}
