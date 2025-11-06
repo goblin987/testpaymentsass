@@ -8,6 +8,7 @@ import sqlite3
 import time
 import json
 import sys
+import os
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch, MagicMock
@@ -15,6 +16,14 @@ from typing import List, Dict
 
 # Add current directory to path
 sys.path.insert(0, '.')
+
+# Set required environment variables BEFORE importing anything
+os.environ.setdefault('TOKEN', 'TEST_TOKEN_FOR_TESTING_ONLY')
+os.environ.setdefault('ADMIN_ID', '999999999')
+os.environ.setdefault('SOL_WALLET1_ADDRESS', 'GxTestWallet1111111111111111111111111111111111')
+os.environ.setdefault('SOL_WALLET2_ADDRESS', 'GxTestWallet2222222222222222222222222222222222')
+os.environ.setdefault('SOL_MIDDLEMAN_ADDRESS', 'GxTestMiddleman333333333333333333333333333333333')
+os.environ.setdefault('SOL_MIDDLEMAN_PRIVATE_KEY', 'TestPrivateKeyNotRealDoNotUse')
 
 # Mock Solana imports before importing modules
 sys.modules['solders'] = MagicMock()
