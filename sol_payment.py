@@ -279,6 +279,18 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
     try:
         logger.debug(f"Fetching signatures for {wallet_address[:8]}...")
         
+        # First, verify the RPC is working by checking balance
+        try:
+            pubkey = Pubkey.from_string(wallet_address)
+            balance_response = solana_client.get_balance(pubkey)
+            if balance_response and balance_response.value is not None:
+                balance_sol = Decimal(balance_response.value) / Decimal('1000000000')
+                logger.info(f"💰 Wallet {wallet_address[:8]}... balance: {balance_sol:.6f} SOL")
+            else:
+                logger.warning(f"⚠️ Could not fetch balance for {wallet_address[:8]}...")
+        except Exception as balance_err:
+            logger.error(f"Error fetching balance: {balance_err}")
+        
         def fetch_signatures():
             # Get recent transaction signatures for this address
             pubkey = Pubkey.from_string(wallet_address)
@@ -291,11 +303,15 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         
         sig_response = await asyncio.to_thread(fetch_signatures)
         
-        if not sig_response or not sig_response.value:
-            logger.warning(f"No signature response for {wallet_address[:8]}...")
+        if not sig_response:
+            logger.error(f"❌ NULL response from Solana RPC for {wallet_address[:8]}...")
             return []
         
-        logger.debug(f"Found {len(sig_response.value)} signature(s) for {wallet_address[:8]}...")
+        if not sig_response.value:
+            logger.warning(f"⚠️ Empty signature list from Solana RPC for {wallet_address[:8]}... (wallet might be new or RPC issue)")
+            return []
+        
+        logger.info(f"✅ Found {len(sig_response.value)} signature(s) for {wallet_address[:8]}...")
         
         transactions = []
         
