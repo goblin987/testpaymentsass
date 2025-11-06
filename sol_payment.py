@@ -956,72 +956,83 @@ async def check_pending_payments(context):
                     
                     logger.info(f"✅ Payment {payment_id} confirmed! TX: {tx_signature}")
                     
-                    # Start atomic transaction for race condition safety
+                    # CRITICAL: Mark payment as 'processing' FIRST to prevent duplicate processing
+                    # Use a separate connection to avoid transaction conflicts
                     try:
-                        c.execute("BEGIN IMMEDIATE")
+                        lock_conn = get_db_connection()
+                        lock_c = lock_conn.cursor()
+                        lock_c.execute("BEGIN IMMEDIATE")
                         
-                        # Re-check if transaction was processed (race condition protection)
-                        c.execute("""
+                        # Check if transaction already processed
+                        lock_c.execute("""
                             SELECT signature FROM processed_sol_transactions 
                             WHERE signature = ?
                         """, (tx_signature,))
                         
-                        if c.fetchone():
+                        if lock_c.fetchone():
                             logger.warning(f"Transaction {tx_signature} was processed by another thread, skipping")
-                            c.execute("ROLLBACK")
+                            lock_conn.close()
                             continue
                         
-                        # CRITICAL: Mark payment as 'processing' immediately to prevent duplicate processing
-                        c.execute("""
+                        # Mark payment as 'processing' immediately
+                        lock_c.execute("""
                             UPDATE pending_sol_payments 
                             SET status = 'processing'
                             WHERE payment_id = ? AND status = 'pending'
                         """, (payment_id,))
                         
-                        if c.rowcount == 0:
+                        if lock_c.rowcount == 0:
                             logger.warning(f"Payment {payment_id} already being processed or confirmed")
-                            c.execute("ROLLBACK")
+                            lock_conn.close()
                             continue
                         
-                        # Commit the 'processing' status immediately
-                        conn.commit()
+                        # Commit the lock
+                        lock_conn.commit()
+                        lock_conn.close()
                         logger.info(f"🔒 Locked payment {payment_id} for processing")
                         
-                        # If payment went to middleman, forward it
-                        forward_success = True
-                        if expected_wallet == 'middleman':
-                            logger.info(f"🔄 Payment to middleman, initiating split forward...")
-                            
-                            forward_results = await forward_split_payment(
-                                payment_id,
-                                tx_signature,
-                                tx_amount
-                            )
-                            
-                            forward_success = all(forward_results.values())
-                            
-                            if not forward_success:
-                                logger.error(f"❌ Split forward failed: {forward_results}")
-                                # Mark payment as 'failed' instead of leaving in 'processing' state
-                                try:
-                                    conn2 = get_db_connection()
-                                    c2 = conn2.cursor()
-                                    c2.execute("""
-                                        UPDATE pending_sol_payments 
-                                        SET status = 'failed'
-                                        WHERE payment_id = ?
-                                    """, (payment_id,))
-                                    conn2.commit()
-                                    conn2.close()
-                                    logger.warning(f"⚠️ Payment {payment_id} marked as failed - manual intervention needed")
-                                except Exception as mark_error:
-                                    logger.error(f"Error marking payment as failed: {mark_error}")
-                                continue
+                    except Exception as lock_error:
+                        logger.error(f"Error locking payment: {lock_error}")
+                        if 'lock_conn' in locals():
+                            lock_conn.close()
+                        continue
+                    
+                    # If payment went to middleman, forward it (outside of any transaction)
+                    forward_success = True
+                    if expected_wallet == 'middleman':
+                        logger.info(f"🔄 Payment to middleman, initiating split forward...")
                         
-                        # Start new atomic transaction for final processing
+                        forward_results = await forward_split_payment(
+                            payment_id,
+                            tx_signature,
+                            tx_amount
+                        )
+                        
+                        forward_success = all(forward_results.values())
+                        
+                        if not forward_success:
+                            logger.error(f"❌ Split forward failed: {forward_results}")
+                            # Mark payment as 'failed'
+                            try:
+                                fail_conn = get_db_connection()
+                                fail_c = fail_conn.cursor()
+                                fail_c.execute("""
+                                    UPDATE pending_sol_payments 
+                                    SET status = 'failed'
+                                    WHERE payment_id = ?
+                                """, (payment_id,))
+                                fail_conn.commit()
+                                fail_conn.close()
+                                logger.warning(f"⚠️ Payment {payment_id} marked as failed - manual intervention needed")
+                            except Exception as mark_error:
+                                logger.error(f"Error marking payment as failed: {mark_error}")
+                            continue
+                    
+                    # Now start NEW atomic transaction for final confirmation
+                    try:
                         c.execute("BEGIN IMMEDIATE")
                         
-                        # Re-check if transaction was processed
+                        # Final check if transaction was processed during forward
                         c.execute("""
                             SELECT signature FROM processed_sol_transactions 
                             WHERE signature = ?
