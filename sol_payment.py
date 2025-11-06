@@ -553,8 +553,14 @@ async def forward_split_payment(
     """
     logger.info(f"🔄 Starting split forward for payment {payment_id}: {total_sol_amount} SOL")
     
-    # Calculate split amounts (reserve a bit for fees)
-    fee_reserve = Decimal('0.00002')  # Reserve for 2 transaction fees
+    # Calculate split amounts (reserve for fees + rent-exempt minimum)
+    # Solana rent-exempt minimum: ~0.00089088 SOL + 2 tx fees (~0.00001 SOL) + buffer
+    fee_reserve = Decimal('0.002')  # Reserve 0.002 SOL for fees and rent
+    
+    if total_sol_amount <= fee_reserve:
+        logger.error(f"❌ Payment amount {total_sol_amount} SOL too small to forward after fees")
+        return {'wallet1': False, 'wallet2': False}
+    
     distributable = total_sol_amount - fee_reserve
     
     amount_wallet1 = (distributable * Decimal('0.20')).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
