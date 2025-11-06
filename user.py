@@ -1563,8 +1563,8 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
              return
 
         placeholders = ','.join('?' for _ in product_ids_in_basket)
-        # MODIFIED: Fetch city, district, original_text
-        c.execute(f"SELECT id, price, name, size, product_type, city, district, original_text FROM products WHERE id IN ({placeholders})", product_ids_in_basket)
+        # MODIFIED: Fetch city, district, original_text, payout_wallet
+        c.execute(f"SELECT id, price, name, size, product_type, city, district, original_text, payout_wallet FROM products WHERE id IN ({placeholders})", product_ids_in_basket)
         product_db_details = {row['id']: dict(row) for row in c.fetchall()}
 
         for item_context in basket:
@@ -1578,14 +1578,15 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
                  item_reseller_discount = (item_original_price * item_reseller_discount_percent / Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
                  item_price_after_reseller = item_original_price - item_reseller_discount
                  total_after_reseller += item_price_after_reseller
-                 # MODIFIED: Enrich item_snapshot
+                 # MODIFIED: Enrich item_snapshot (including payout_wallet for SOL payments)
                  item_snapshot = {
                      "product_id": prod_id, "price": float(item_original_price),
                      "name": details['name'], "size": details['size'],
                      "product_type": item_product_type,
                      "city": details['city'],
                      "district": details['district'],
-                     "original_text": details.get('original_text')
+                     "original_text": details.get('original_text'),
+                     "payout_wallet": details.get('payout_wallet', 'wallet1')  # Include wallet routing info
                  }
                  valid_basket_items_snapshot.append(item_snapshot)
              else: logger.warning(f"Product {prod_id} missing during payment confirm user {user_id} (DB fetch).")
@@ -1958,8 +1959,8 @@ async def handle_pay_single_item(update: Update, context: ContextTypes.DEFAULT_T
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("BEGIN EXCLUSIVE")
-        # MODIFIED: Fetch city, district, original_text for snapshot
-        c.execute("SELECT id, name, price, size, product_type, city, district, original_text FROM products WHERE city = ? AND district = ? AND product_type = ? AND size = ? AND price = ? AND available > reserved ORDER BY id LIMIT 1", (city, district, p_type, size, float(original_price)))
+        # MODIFIED: Fetch city, district, original_text, payout_wallet for snapshot
+        c.execute("SELECT id, name, price, size, product_type, city, district, original_text, payout_wallet FROM products WHERE city = ? AND district = ? AND product_type = ? AND size = ? AND price = ? AND available > reserved ORDER BY id LIMIT 1", (city, district, p_type, size, float(original_price)))
         product_to_reserve = c.fetchone()
 
         if not product_to_reserve:
@@ -1994,7 +1995,7 @@ async def handle_pay_single_item(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if reserved_id and product_details_for_snapshot:
-        # MODIFIED: Enrich single_item_snapshot
+        # MODIFIED: Enrich single_item_snapshot (including payout_wallet for SOL payments)
         single_item_snapshot = [{
             "product_id": reserved_id,
             "price": float(original_price),
@@ -2003,7 +2004,8 @@ async def handle_pay_single_item(update: Update, context: ContextTypes.DEFAULT_T
             "product_type": product_details_for_snapshot['product_type'],
             "city": product_details_for_snapshot['city'],
             "district": product_details_for_snapshot['district'],
-            "original_text": product_details_for_snapshot.get('original_text')
+            "original_text": product_details_for_snapshot.get('original_text'),
+            "payout_wallet": product_details_for_snapshot.get('payout_wallet', 'wallet1')  # Include wallet routing info
         }]
 
         reseller_discount_percent = await asyncio.to_thread(get_reseller_discount, user_id, p_type)
