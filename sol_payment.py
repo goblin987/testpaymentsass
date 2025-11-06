@@ -303,6 +303,12 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
     Returns:
         List of transaction dictionaries with incoming transfers
     """
+    global solana_client
+    
+    if not solana_client:
+        logger.error("❌ Solana client not initialized! Call init_sol_config() first.")
+        return []
+    
     try:
         logger.debug(f"Fetching signatures for {wallet_address[:8]}...")
         
@@ -316,7 +322,7 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
             else:
                 logger.warning(f"⚠️ Could not fetch balance for {wallet_address[:8]}...")
         except Exception as balance_err:
-            logger.error(f"Error fetching balance: {balance_err}")
+            logger.error(f"Error fetching balance: {balance_err}", exc_info=True)
         
         def fetch_signatures():
             # Get recent transaction signatures for this address
@@ -466,7 +472,7 @@ async def check_wallet_transactions(wallet_address: str, limit: int = 20) -> Lis
         return transactions
         
     except Exception as e:
-        logger.error(f"Error fetching wallet transactions for {wallet_address[:8]}...: {e}")
+        logger.error(f"Error fetching wallet transactions for {wallet_address[:8]}...: {e}", exc_info=True)
         return []
 
 
@@ -477,6 +483,12 @@ async def verify_sol_transaction(signature: str) -> Optional[Dict]:
     Returns:
         Transaction details if found and confirmed, None otherwise
     """
+    global solana_client
+    
+    if not solana_client:
+        logger.error("❌ Solana client not initialized!")
+        return None
+    
     try:
         def fetch_transaction():
             # Convert string signature to Signature object
@@ -617,6 +629,12 @@ async def send_sol_transaction(
     Returns:
         Transaction signature if successful, None otherwise
     """
+    global solana_client
+    
+    if not solana_client:
+        logger.error("❌ Solana client not initialized!")
+        return None
+    
     try:
         def send_tx():
             # Convert SOL to lamports
