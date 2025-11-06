@@ -225,6 +225,7 @@ def callback_query_router(func):
 
                 # Primary Admin Handlers (from admin.py)
                 "admin_menu": admin.handle_admin_menu,
+                "admin_switch_lang": admin.handle_admin_switch_lang,
                 "sales_analytics_menu": admin.handle_sales_analytics_menu, "sales_dashboard": admin.handle_sales_dashboard,
                 "sales_select_period": admin.handle_sales_select_period, "sales_run": admin.handle_sales_run,
                 "adm_city": admin.handle_adm_city, "adm_dist": admin.handle_adm_dist, "adm_type": admin.handle_adm_type,

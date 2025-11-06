@@ -383,6 +383,14 @@ LANGUAGES = {
 
         # --- Admin ---
         "admin_menu": "🔧 Admin Panel\n\nManage the bot from here:",
+        "admin_dashboard_title": "🔧 Admin Dashboard (Primary)",
+        "admin_total_users": "👥 Total Users",
+        "admin_sum_balances": "💰 Sum of User Balances",
+        "admin_total_sales": "📈 Total Sales Value",
+        "admin_active_products": "📦 Active Products",
+        "admin_select_action": "Select an action:",
+        "admin_lang_button": "🌐 Language: {lang}",
+        "admin_lang_switched": "Admin language switched to {lang}",
         "admin_select_city": "🏙️ Select City to Edit\n\nChoose a city:",
         "admin_select_district": "🏘️ Select District in {city}\n\nPick a district:",
         "admin_select_type": "💎 Select Product Type\n\nChoose or create a type:",
@@ -725,11 +733,19 @@ LANGUAGES = {
 
 
         # --- Admin ---
-        "admin_menu": "🔧 Admin Panel\n\nManage the bot from here:",
-        "admin_select_city": "🏙️ Select City to Edit\n\nChoose a city:",
-        "admin_select_district": "🏘️ Select District in {city}\n\nPick a district:",
-        "admin_select_type": "💎 Select Product Type\n\nChoose or create a type:",
-        "admin_choose_action": "📦 Manage {type} in {city}, {district}\n\nWhat would you like to do?",
+        "admin_menu": "🔧 Administratoriaus Skydelis\n\nValdykite botą iš čia:",
+        "admin_dashboard_title": "🔧 Administratoriaus Skydelis (Pagrindinis)",
+        "admin_total_users": "👥 Iš viso Vartotojų",
+        "admin_sum_balances": "💰 Vartotojų Balansų Suma",
+        "admin_total_sales": "📈 Bendra Pardavimų Vertė",
+        "admin_active_products": "📦 Aktyvios Prekės",
+        "admin_select_action": "Pasirinkite veiksmą:",
+        "admin_lang_button": "🌐 Kalba: {lang}",
+        "admin_lang_switched": "Administratoriaus kalba pakeista į {lang}",
+        "admin_select_city": "🏙️ Pasirinkite Miestą Redaguoti\n\nPasirinkite miestą:",
+        "admin_select_district": "🏘️ Pasirinkite Rajoną {city} mieste\n\nPasirinkite rajoną:",
+        "admin_select_type": "💎 Pasirinkite Prekės Tipą\n\nPasirinkite arba sukurkite tipą:",
+        "admin_choose_action": "📦 Valdyti {type} mieste {city}, {district}\n\nKą norėtumėte padaryti?",
         "set_media_prompt_plain": "📸 Send a photo, video, or GIF to display above all messages:",
         "state_error": "❌ Error: Invalid State\n\nPlease start the 'Add New Product' process again from the Admin Panel.",
         "support": "📞 Need Help?\n\nContact {support} for assistance!",
@@ -1696,6 +1712,21 @@ def _get_lang_data(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, dict]:
         logger.warning(f"_get_lang_data: Language '{lang}' not found in LANGUAGES dict. Falling back to 'en'.")
         lang = 'en' # Ensure lang variable reflects the fallback
     return lang, lang_data
+
+def _get_admin_lang_data(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, dict]:
+    """Gets the admin panel language code and corresponding language data dictionary."""
+    # Admin language is stored separately from user language
+    if hasattr(context, 'user_data'):
+        admin_lang = context.user_data.get("admin_lang", "en")
+    else:
+        admin_lang = "en"  # Default for background tasks
+    
+    # Validate language exists
+    if admin_lang not in LANGUAGES:
+        admin_lang = "en"
+    
+    lang_data = LANGUAGES.get(admin_lang, LANGUAGES['en'])
+    return admin_lang, lang_data
 
 def format_currency(value):
     try: return f"{Decimal(str(value)):.2f}"

@@ -47,6 +47,7 @@ from utils import (
     # User status helpers
     get_user_status, get_progress_bar,
     _get_lang_data,  # <<<===== IMPORT THE HELPER =====>>>
+    _get_admin_lang_data,  # <<<===== IMPORT THE ADMIN LANG HELPER =====>>>
     # <<< Admin Logging >>>
     log_admin_action, ACTION_RESELLER_DISCOUNT_DELETE, # Import logging helper and action constant
     ACTION_PRODUCT_TYPE_REASSIGN, # <<< ADDED for reassign type log
@@ -499,18 +500,25 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     finally:
         if conn: conn.close()
 
+    # Get admin language
+    admin_lang, admin_lang_data = _get_admin_lang_data(context)
+    
     total_user_balance_str = format_currency(total_user_balance)
     total_sales_value_str = format_currency(total_sales_value)
+    
+    lang_display = "EN" if admin_lang == "en" else "LT"
+    
     msg = (
-       f"🔧 Admin Dashboard (Primary)\n\n"
-       f"👥 Total Users: {total_users}\n"
-       f"💰 Sum of User Balances: {total_user_balance_str} EUR\n"
-       f"📈 Total Sales Value: {total_sales_value_str} EUR\n"
-       f"📦 Active Products: {active_products}\n\n"
-       "Select an action:"
+       f"{admin_lang_data.get('admin_dashboard_title', '🔧 Admin Dashboard (Primary)')}\n\n"
+       f"{admin_lang_data.get('admin_total_users', '👥 Total Users')}: {total_users}\n"
+       f"{admin_lang_data.get('admin_sum_balances', '💰 Sum of User Balances')}: {total_user_balance_str} EUR\n"
+       f"{admin_lang_data.get('admin_total_sales', '📈 Total Sales Value')}: {total_sales_value_str} EUR\n"
+       f"{admin_lang_data.get('admin_active_products', '📦 Active Products')}: {active_products}\n\n"
+       f"{admin_lang_data.get('admin_select_action', 'Select an action:')}"
     )
 
     keyboard = [
+        [InlineKeyboardButton(admin_lang_data.get('admin_lang_button', '🌐 Language: {lang}').format(lang=lang_display), callback_data="admin_switch_lang")],
         [InlineKeyboardButton("📊 Sales Analytics", callback_data="sales_analytics_menu")],
         [InlineKeyboardButton("🔍 Recent Purchases", callback_data="adm_recent_purchases|0")],
         [InlineKeyboardButton("➕ Add Products", callback_data="adm_city")],
@@ -552,6 +560,37 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await send_message_with_retry(context.bot, chat_id, msg, reply_markup=reply_markup, parse_mode=None)
     else:
         await send_message_with_retry(context.bot, chat_id, msg, reply_markup=reply_markup, parse_mode=None)
+
+
+# --- Admin Language Switcher ---
+async def handle_admin_switch_lang(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Switches admin panel language between English and Lithuanian."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Check admin access
+    if not is_primary_admin(user_id):
+        return await query.answer("Access denied.", show_alert=True)
+    
+    # Get current admin language
+    current_admin_lang = context.user_data.get("admin_lang", "en")
+    
+    # Toggle between en and lt
+    new_admin_lang = "lt" if current_admin_lang == "en" else "en"
+    
+    # Save new admin language
+    context.user_data["admin_lang"] = new_admin_lang
+    
+    # Get language data for notification
+    lang_data = LANGUAGES.get(new_admin_lang, LANGUAGES['en'])
+    lang_display = "EN" if new_admin_lang == "en" else "LT"
+    
+    # Notify user
+    answer_text = lang_data.get("admin_lang_switched", "Admin language switched to {lang}").format(lang=lang_display)
+    await query.answer(answer_text, show_alert=False)
+    
+    # Refresh admin menu with new language
+    await handle_admin_menu(update, context)
 
 
 # --- Sales Analytics Handlers ---
