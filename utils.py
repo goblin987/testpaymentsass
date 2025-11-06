@@ -1684,7 +1684,12 @@ async def is_user_banned(user_id: int) -> bool:
 # --- Utility Functions ---
 def _get_lang_data(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, dict]:
     """Gets the current language code and corresponding language data dictionary."""
-    lang = context.user_data.get("lang", "en")
+    # Handle both regular Context and Application objects (from background tasks)
+    if hasattr(context, 'user_data'):
+        lang = context.user_data.get("lang", "en")
+    else:
+        lang = "en"  # Default for background tasks
+    
     # Uses LANGUAGES dict defined above in this file
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
     if lang not in LANGUAGES:

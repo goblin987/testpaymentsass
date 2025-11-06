@@ -106,7 +106,13 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
     Decrements stock, adds purchase record, sends media first, then text separately,
     cleans up product records.
     """
-    chat_id = context._chat_id or context._user_id or user_id # Try to get chat_id
+    # Get chat_id - handle both regular Context and Application objects (from background tasks)
+    chat_id = user_id  # Default to user_id
+    if hasattr(context, '_chat_id'):
+        chat_id = context._chat_id or user_id
+    elif hasattr(context, '_user_id'):
+        chat_id = context._user_id or user_id
+    
     if not chat_id:
          logger.error(f"Cannot determine chat_id for user {user_id} in _finalize_purchase")
 
