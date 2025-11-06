@@ -71,14 +71,18 @@ def init_sol_config():
     SOLSCAN_API_KEY = api_key
     SOL_CHECK_INTERVAL = check_interval
     
-    # Initialize middleman keypair from private key
-    try:
-        private_key_bytes = base58.b58decode(mm_key)
-        SOL_MIDDLEMAN_KEYPAIR = Keypair.from_bytes(private_key_bytes)
-        logger.info(f"✅ Middleman keypair initialized: {str(SOL_MIDDLEMAN_KEYPAIR.pubkey())[:8]}...")
-    except Exception as e:
-        logger.error(f"Failed to initialize middleman keypair: {e}")
-        raise
+    # Initialize middleman keypair from private key (optional - only needed for split payments)
+    if mm_key:
+        try:
+            private_key_bytes = base58.b58decode(mm_key)
+            SOL_MIDDLEMAN_KEYPAIR = Keypair.from_bytes(private_key_bytes)
+            logger.info(f"✅ Middleman keypair initialized: {str(SOL_MIDDLEMAN_KEYPAIR.pubkey())[:8]}...")
+        except Exception as e:
+            logger.error(f"Failed to initialize middleman keypair: {e}")
+            logger.warning("⚠️ Middleman wallet not available. Split payments will fail!")
+            SOL_MIDDLEMAN_KEYPAIR = None
+    else:
+        logger.warning("⚠️ SOL_MIDDLEMAN_PRIVATE_KEY not set. Split payments will not work!")
     
     # Initialize Solana RPC client
     solana_client = SolanaClient(SOLANA_RPC_URL)
@@ -568,10 +572,19 @@ async def process_pending_sol_payments(context):
     Background task to check for incoming SOL payments.
     Runs continuously to monitor pending payments.
     """
-    logger.info("🔍 Starting SOL payment monitoring service...")
+    try:
+        logger.info("🔍 Starting SOL payment monitoring service...")
+        
+        # Initialize configuration
+        init_sol_config()
+        logger.info("✅ SOL configuration initialized successfully")
+        
+    except Exception as e:
+        logger.critical(f"❌ CRITICAL: Failed to initialize SOL payment monitoring: {e}", exc_info=True)
+        logger.critical("SOL payments will NOT be monitored automatically!")
+        return
     
-    # Initialize configuration
-    init_sol_config()
+    logger.info(f"💰 Monitoring wallets: W1={SOL_WALLET1_ADDRESS[:8]}..., W2={SOL_WALLET2_ADDRESS[:8]}..., MM={SOL_MIDDLEMAN_ADDRESS[:8]}...")
     
     while True:
         try:
@@ -601,9 +614,10 @@ async def check_pending_payments(context):
         pending = c.fetchall()
         
         if not pending:
+            logger.debug("No pending SOL payments to check")
             return
         
-        logger.debug(f"🔍 Checking {len(pending)} pending SOL payments...")
+        logger.info(f"🔍 Checking {len(pending)} pending SOL payment(s)...")
         
         for payment in pending:
             payment_id = payment['payment_id']
