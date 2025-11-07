@@ -845,13 +845,17 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
                         f"📤 Please fund middleman wallet:\n"
                         f"<code>{SOL_MIDDLEMAN_ADDRESS}</code>"
                     )
-                    await send_message_with_retry(
-                        None,  # No context in background task
-                        chat_id=admin_id,
-                        text=alert_msg,
-                        parse_mode='HTML'
-                    )
-                    logger.info(f"  📢 Low balance alert sent to admin {admin_id}")
+                    # Check if bot is available before sending
+                    if context and hasattr(context, 'bot') and context.bot:
+                        await send_message_with_retry(
+                            context.bot,
+                            chat_id=admin_id,
+                            text=alert_msg,
+                            parse_mode='HTML'
+                        )
+                        logger.info(f"  📢 Low balance alert sent to admin {admin_id}")
+                    else:
+                        logger.warning(f"  ⚠️ Cannot send low balance alert - bot context not available")
             except Exception as alert_error:
                 logger.error(f"  ❌ Failed to send admin alert: {alert_error}")
             
