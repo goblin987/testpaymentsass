@@ -1245,9 +1245,9 @@ async def handle_adm_bulk_price_message(update: Update, context: ContextTypes.DE
     # Show wallet selection before proceeding to messages
     msg = "💳 Select payout wallet:\n\nWhere should payments go for these products?"
     keyboard = [
-        [InlineKeyboardButton("💳 Asmenine (100%)", callback_data="adm_bulk_wallet:wallet1")],
-        [InlineKeyboardButton("💳 Kolegos (100%)", callback_data="adm_bulk_wallet:wallet2")],
-        [InlineKeyboardButton("💳 Split (20% Asmenine / 80% Kolegos)", callback_data="adm_bulk_wallet:split")]
+        [InlineKeyboardButton("💳 Asmenine (100%)", callback_data="adm_bulk_wallet|wallet1")],
+        [InlineKeyboardButton("💳 Kolegos (100%)", callback_data="adm_bulk_wallet|wallet2")],
+        [InlineKeyboardButton("💳 Split (20% Asmenine / 80% Kolegos)", callback_data="adm_bulk_wallet|split")]
     ]
     await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
     return  # Exit here, wallet handler will continue the flow
@@ -1268,7 +1268,7 @@ async def handle_adm_bulk_wallet(update: Update, context: ContextTypes.DEFAULT_T
     if context.user_data.get("state") != "awaiting_bulk_wallet":
         return await query.answer("Invalid state. Please restart.", show_alert=True)
     
-    # Extract wallet choice from callback data (format: adm_bulk_wallet:wallet1)
+    # Extract wallet choice from callback data (format: adm_bulk_wallet|wallet1)
     wallet_choice = params[0] if params else "wallet1"
     context.user_data["admin_wallet_choice"] = wallet_choice
     context.user_data["state"] = "awaiting_bulk_messages"
