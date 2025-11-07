@@ -843,60 +843,86 @@ async def send_sol_transaction(
         return None
     
     try:
-        def send_tx():
-            # Convert SOL to lamports
-            lamports = int(amount_sol * Decimal('1000000000'))
-            
-            # Create transfer instruction
-            transfer_ix = transfer(
-                TransferParams(
-                    from_pubkey=from_keypair.pubkey(),
-                    to_pubkey=Pubkey.from_string(to_address),
-                    lamports=lamports
-                )
-            )
-            
-            # Get recent blockhash
-            blockhash_resp = solana_client.get_latest_blockhash()
-            if not blockhash_resp or not blockhash_resp.value:
-                logger.error("Failed to get recent blockhash")
-                return None
-            
-            recent_blockhash = blockhash_resp.value.blockhash
-            
-            # Create transaction
-            message = Message.new_with_blockhash(
-                [transfer_ix],
-                from_keypair.pubkey(),
-                recent_blockhash
-            )
-            transaction = Transaction([from_keypair], message, recent_blockhash)
-            
-            # Send transaction (transaction already signed, don't pass keypair again)
-            tx_opts = TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
-            response = solana_client.send_transaction(
-                transaction,
-                opts=tx_opts
-            )
-            
-            if response and response.value:
-                return str(response.value)
-            
-            return None
+        logger.debug(f"     🔧 Converting {amount_sol} SOL to lamports...")
+        lamports = int(amount_sol * Decimal('1000000000'))
+        logger.debug(f"     🔧 Amount: {lamports} lamports")
         
+        def send_tx():
+            try:
+                logger.debug(f"     🔧 Creating transfer instruction...")
+                # Create transfer instruction
+                transfer_ix = transfer(
+                    TransferParams(
+                        from_pubkey=from_keypair.pubkey(),
+                        to_pubkey=Pubkey.from_string(to_address),
+                        lamports=lamports
+                    )
+                )
+                logger.debug(f"     ✅ Transfer instruction created")
+                
+                # Get recent blockhash
+                logger.debug(f"     🔧 Fetching recent blockhash...")
+                blockhash_resp = solana_client.get_latest_blockhash()
+                if not blockhash_resp or not blockhash_resp.value:
+                    logger.error("     ❌ Failed to get recent blockhash (no response)")
+                    return None
+                
+                recent_blockhash = blockhash_resp.value.blockhash
+                logger.debug(f"     ✅ Blockhash: {str(recent_blockhash)[:16]}...")
+                
+                # Create transaction
+                logger.debug(f"     🔧 Creating transaction message...")
+                message = Message.new_with_blockhash(
+                    [transfer_ix],
+                    from_keypair.pubkey(),
+                    recent_blockhash
+                )
+                logger.debug(f"     ✅ Message created")
+                
+                logger.debug(f"     🔧 Creating signed transaction...")
+                transaction = Transaction([from_keypair], message, recent_blockhash)
+                logger.debug(f"     ✅ Transaction signed")
+                
+                # Send transaction (transaction already signed, don't pass keypair again)
+                logger.debug(f"     🔧 Sending transaction to RPC...")
+                tx_opts = TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
+                response = solana_client.send_transaction(
+                    transaction,
+                    opts=tx_opts
+                )
+                logger.debug(f"     ✅ RPC response received")
+                
+                if response and response.value:
+                    sig = str(response.value)
+                    logger.info(f"     ✅ Transaction sent! Signature: {sig[:16]}...")
+                    return sig
+                else:
+                    logger.error(f"     ❌ send_transaction returned no signature (response={response})")
+                    return None
+            except Exception as inner_e:
+                logger.error(f"     ❌ Error in send_tx inner function: {inner_e}", exc_info=True)
+                return None
+        
+        logger.debug(f"     🔧 Executing send_tx in thread...")
         signature = await asyncio.to_thread(send_tx)
         
-        if signature:
-            # Wait for confirmation
-            await asyncio.sleep(2)
-            confirmed = await verify_sol_transaction(signature)
-            if confirmed:
-                return signature
+        if not signature:
+            logger.error(f"     ❌ send_tx returned None")
+            return None
         
-        return None
+        logger.debug(f"     ✅ Transaction sent, waiting for confirmation...")
+        # Wait for confirmation
+        await asyncio.sleep(2)
+        confirmed = await verify_sol_transaction(signature)
+        if confirmed:
+            logger.info(f"     ✅ Transaction CONFIRMED: {signature[:16]}...")
+            return signature
+        else:
+            logger.error(f"     ❌ Transaction NOT confirmed: {signature[:16]}...")
+            return None
         
     except Exception as e:
-        logger.error(f"Error sending SOL transaction: {e}", exc_info=True)
+        logger.error(f"     ❌ Error sending SOL transaction: {e}", exc_info=True)
         return None
 
 
