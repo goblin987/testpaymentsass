@@ -1819,10 +1819,12 @@ async def _create_sol_payment_for_basket(update: Update, context: ContextTypes.D
     wallet_address = payment_result['wallet_address']
     payment_id = payment_result['payment_id']
     sol_price = payment_result['sol_price_eur']
+    # Calculate effective price (includes 1% buffer)
+    effective_price = sol_price * 1.01
     
     msg = f"💳 **SOL Payment Required**\n\n"
     msg += f"Amount: **{sol_amount:.6f} SOL**\n"
-    msg += f"(~{total_eur:.2f} EUR at {sol_price:.2f} EUR/SOL)\n\n"
+    msg += f"(~{total_eur:.2f} EUR at {effective_price:.2f} EUR/SOL)\n\n"
     msg += f"📍 Send SOL to this address:\n"
     msg += f"`{wallet_address}`\n\n"
     

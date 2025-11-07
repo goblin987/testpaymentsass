@@ -430,12 +430,14 @@ async def create_sol_topup_payment(
         
         # Format message
         amount_eur_str = format_currency(amount_eur)
+        # Calculate effective price (includes 1% buffer)
+        effective_price = sol_price * Decimal('1.01')
         
         msg = f"""🔄 **Top Up Your Balance**
 
 💰 Amount: {amount_eur_str} EUR
 📊 SOL Amount: {sol_amount:.6f} SOL
-💳 SOL Price: {sol_price:.2f} EUR
+💳 Rate: {effective_price:.2f} EUR/SOL
 
 **Send exactly this amount:**
 `{sol_amount:.6f}` SOL
@@ -444,7 +446,6 @@ async def create_sol_topup_payment(
 `{wallet_address}`
 
 ⏱️ Payment valid for: 20 minutes
-🔍 Payment ID: `{payment_id}`
 
 Your balance will be automatically credited once payment is confirmed."""
         
