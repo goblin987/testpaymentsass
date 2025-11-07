@@ -983,20 +983,23 @@ async def check_pending_payments(context):
         
         pending = c.fetchall()
         
-        # ✅ CRITICAL: Close main connection BEFORE processing payments
+        if not pending:
+            logger.debug("No pending SOL payments to check")
+            conn.close()
+            return
+        
+        # Convert to list of dicts BEFORE closing connection
+        # sqlite3.Row objects need connection to be open
+        pending_list = [dict(p) for p in pending]
+        logger.debug(f"  📊 Fetched {len(pending_list)} pending payment(s), converted to dicts")
+        
+        # ✅ CRITICAL: Close main connection AFTER converting to dicts
         # This releases the shared lock and prevents self-deadlock
         conn.close()
         conn = None
-        logger.debug(f"  📊 Fetched {len(pending)} pending payment(s), main connection closed")
+        logger.debug(f"  🔒 Main connection closed - shared lock released")
         
-        if not pending:
-            logger.debug("No pending SOL payments to check")
-            return
-        
-        logger.info(f"🔍 Checking {len(pending)} pending SOL payment(s)...")
-        
-        # Convert to list of dicts to avoid sqlite3.Row issues after connection close
-        pending_list = [dict(p) for p in pending]
+        logger.info(f"🔍 Checking {len(pending_list)} pending SOL payment(s)...")
         
         for payment in pending_list:
             payment_id = payment['payment_id']
