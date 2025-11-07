@@ -1053,19 +1053,30 @@ async def check_pending_payments(context):
             logger.debug(f"  Created: {created_at.isoformat()}, Expires: {expires_at.isoformat()}")
             
             # Check if this payment is already being processed by another thread
-            c.execute("""
-                SELECT status FROM pending_sol_payments 
-                WHERE payment_id = ?
-            """, (payment_id,))
-            current_status_row = c.fetchone()
-            if current_status_row:
-                current_status = current_status_row[0]
-                if current_status == 'processing':
-                    logger.debug(f"Payment {payment_id} is already being processed, skipping")
-                    continue
-                elif current_status == 'confirmed':
-                    logger.debug(f"Payment {payment_id} already confirmed, skipping")
-                    continue
+            # Need new connection since main one was closed
+            status_conn = None
+            try:
+                status_conn = get_db_connection()
+                status_c = status_conn.cursor()
+                status_c.execute("""
+                    SELECT status FROM pending_sol_payments 
+                    WHERE payment_id = ?
+                """, (payment_id,))
+                current_status_row = status_c.fetchone()
+                if current_status_row:
+                    current_status = current_status_row[0]
+                    if current_status == 'processing':
+                        logger.debug(f"Payment {payment_id} is already being processed, skipping")
+                        continue
+                    elif current_status == 'confirmed':
+                        logger.debug(f"Payment {payment_id} already confirmed, skipping")
+                        continue
+            except Exception as status_error:
+                logger.error(f"Error checking payment status: {status_error}")
+                continue
+            finally:
+                if status_conn:
+                    status_conn.close()
             
             # Check recent transactions to this wallet
             logger.debug(f"  📡 Fetching transactions for {wallet_address[:8]}...")
@@ -1112,30 +1123,43 @@ async def check_pending_payments(context):
                     diff_percent = (diff / expected_amount * 100) if expected_amount > 0 else 0
                     logger.info(f"  💰 [MATCH FOUND] TX {tx_signature[:16]}... = {tx_amount:.6f} SOL")
                     logger.info(f"      Expected: {expected_amount:.6f} SOL, Diff: {diff:+.6f} SOL ({diff_percent:+.3f}%)")
+                    
                     # Check if we already processed this transaction
+                    # Need new connection since main one was closed
                     logger.debug(f"      🔍 Checking if TX already processed...")
-                    c.execute("""
-                        SELECT signature FROM processed_sol_transactions 
-                        WHERE signature = ?
-                    """, (tx_signature,))
-                    
-                    if c.fetchone():
-                        logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already processed, skipping")
+                    check_conn = None
+                    try:
+                        check_conn = get_db_connection()
+                        check_c = check_conn.cursor()
+                        
+                        check_c.execute("""
+                            SELECT signature FROM processed_sol_transactions 
+                            WHERE signature = ?
+                        """, (tx_signature,))
+                        
+                        if check_c.fetchone():
+                            logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already processed, skipping")
+                            continue
+                        logger.debug(f"      ✅ TX not in processed_sol_transactions")
+                        
+                        # Also verify this transaction isn't already assigned to another payment
+                        logger.debug(f"      🔍 Checking if TX assigned to different payment...")
+                        check_c.execute("""
+                            SELECT payment_id FROM processed_sol_transactions 
+                            WHERE signature = ? AND payment_id != ?
+                        """, (tx_signature, payment_id))
+                        
+                        other_payment = check_c.fetchone()
+                        if other_payment:
+                            logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already used for payment {other_payment[0]}, skipping")
+                            continue
+                        logger.debug(f"      ✅ TX not assigned to other payment")
+                    except Exception as check_error:
+                        logger.error(f"      ❌ Error checking transaction status: {check_error}")
                         continue
-                    logger.debug(f"      ✅ TX not in processed_sol_transactions")
-                    
-                    # Also verify this transaction isn't already assigned to another payment
-                    logger.debug(f"      🔍 Checking if TX assigned to different payment...")
-                    c.execute("""
-                        SELECT payment_id FROM processed_sol_transactions 
-                        WHERE signature = ? AND payment_id != ?
-                    """, (tx_signature, payment_id))
-                    
-                    other_payment = c.fetchone()
-                    if other_payment:
-                        logger.warning(f"      ⏭️ TX {tx_signature[:16]}... already used for payment {other_payment[0]}, skipping")
-                        continue
-                    logger.debug(f"      ✅ TX not assigned to other payment")
+                    finally:
+                        if check_conn:
+                            check_conn.close()
                     
                     # Transaction is already confirmed (we only get confirmed txs from check_wallet_transactions)
                     # The 'confirmed' field in tx dict indicates it passed all checks
