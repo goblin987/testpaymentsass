@@ -1415,8 +1415,16 @@ def init_db():
                 expires_at TEXT NOT NULL,
                 status TEXT DEFAULT 'pending',
                 transaction_signature TEXT,
+                retry_count INTEGER DEFAULT 0,
                 FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
             )''')
+            
+            # Add retry_count column if it doesn't exist (migration)
+            try:
+                c.execute("SELECT retry_count FROM pending_sol_payments LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("Adding retry_count column to pending_sol_payments table...")
+                c.execute("ALTER TABLE pending_sol_payments ADD COLUMN retry_count INTEGER DEFAULT 0")
             
             # Processed SOL transactions table (prevent double-processing)
             c.execute('''CREATE TABLE IF NOT EXISTS processed_sol_transactions (

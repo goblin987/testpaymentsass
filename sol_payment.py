@@ -615,6 +615,39 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
     logger.info(f"🔄 [SPLIT FORWARD] Payment {payment_id}: Starting split forward (LOCK ACQUIRED)")
     logger.info(f"  Source TX: {source_signature[:16]}..., Amount: {total_sol_amount:.6f} SOL")
     
+    # IDEMPOTENCY CHECK: Verify this payment hasn't already been forwarded
+    logger.debug(f"  🔍 Idempotency check: Checking if payment already forwarded...")
+    idempotency_conn = None
+    try:
+        idempotency_conn = get_db_connection()
+        idempotency_c = idempotency_conn.cursor()
+        idempotency_c.execute("""
+            SELECT payment_id, wallet1_signature, wallet2_signature, success
+            FROM sol_forwarding_log
+            WHERE payment_id = ? AND source_signature = ?
+        """, (payment_id, source_signature))
+        
+        existing_forward = idempotency_c.fetchone()
+        if existing_forward:
+            logger.warning(f"  ⚠️ [IDEMPOTENCY] Payment {payment_id} already forwarded!")
+            logger.warning(f"     W1 TX: {existing_forward['wallet1_signature']}")
+            logger.warning(f"     W2 TX: {existing_forward['wallet2_signature']}")
+            logger.warning(f"     Success: {existing_forward['success']}")
+            logger.warning(f"     Skipping duplicate forward to prevent double-payment")
+            # Return the previous results
+            return {
+                'wallet1': existing_forward['wallet1_signature'] is not None,
+                'wallet2': existing_forward['wallet2_signature'] is not None
+            }
+        logger.debug(f"  ✅ No previous forward found, proceeding...")
+    except Exception as check_error:
+        logger.error(f"  ❌ Error checking forward idempotency: {check_error}")
+        # Continue anyway - better to risk duplicate than to fail payment
+        logger.warning(f"  ⚠️ Proceeding with forward despite idempotency check failure")
+    finally:
+        if idempotency_conn:
+            idempotency_conn.close()
+    
     # Solana transaction fees: Each transfer costs ~0.000005 SOL
     # The fee is deducted from the sender's balance IN ADDITION to the transfer amount
     # Solana rent-exempt minimum: ~0.00089088 SOL
@@ -648,6 +681,31 @@ async def _forward_split_payment_locked(payment_id: str, total_sol_amount: Decim
             logger.error(f"     Fees needed: {TOTAL_FEES:.6f} SOL")
             logger.error(f"     Shortfall: {abs(max_forwardable):.6f} SOL")
             logger.error(f"  ⚠️ URGENT: Fund middleman wallet with at least 0.005 SOL!")
+            
+            # Send alert to admin
+            try:
+                from telegram import Bot
+                admin_id = get_first_primary_admin_id()
+                if admin_id:
+                    alert_msg = (
+                        f"🚨 <b>URGENT: Middleman Wallet Low Balance!</b>\n\n"
+                        f"Current Balance: <code>{current_balance:.6f} SOL</code>\n"
+                        f"Minimum Needed: <code>0.005 SOL</code>\n"
+                        f"Shortfall: <code>{abs(max_forwardable):.6f} SOL</code>\n\n"
+                        f"⚠️ All split payments are currently FAILING!\n"
+                        f"📤 Please fund middleman wallet:\n"
+                        f"<code>{SOL_MIDDLEMAN_ADDRESS}</code>"
+                    )
+                    await send_message_with_retry(
+                        None,  # No context in background task
+                        chat_id=admin_id,
+                        text=alert_msg,
+                        parse_mode='HTML'
+                    )
+                    logger.info(f"  📢 Low balance alert sent to admin {admin_id}")
+            except Exception as alert_error:
+                logger.error(f"  ❌ Failed to send admin alert: {alert_error}")
+            
             return {'wallet1': False, 'wallet2': False}
         
         # Determine how much to forward
@@ -1000,7 +1058,7 @@ async def check_pending_payments(context):
         
         # First, get details of stuck payments before updating
         c.execute("""
-            SELECT payment_id, user_id, created_at, expected_wallet
+            SELECT payment_id, user_id, created_at, expected_wallet, retry_count
             FROM pending_sol_payments 
             WHERE status = 'processing' 
             AND created_at < ?
@@ -1010,20 +1068,28 @@ async def check_pending_payments(context):
         if stuck_payments:
             logger.warning(f"♻️ [RECOVERY] Found {len(stuck_payments)} stuck 'processing' payment(s)")
             for stuck in stuck_payments:
-                logger.warning(f"     Payment {stuck['payment_id']}: user={stuck['user_id']}, wallet={stuck['expected_wallet']}, stuck since {stuck['created_at']}")
-        
-        # Now update them back to pending
-        c.execute("""
-            UPDATE pending_sol_payments 
-            SET status = 'pending'
-            WHERE status = 'processing' 
-            AND created_at < ?
-        """, (two_min_ago,))
-        
-        recovered = c.rowcount
-        if recovered > 0:
-            logger.warning(f"  ✅ [RECOVERY] Recovered {recovered} payment(s) back to 'pending' status")
+                retry_count = stuck.get('retry_count', 0)
+                logger.warning(f"     Payment {stuck['payment_id']}: user={stuck['user_id']}, wallet={stuck['expected_wallet']}, stuck since {stuck['created_at']}, retries={retry_count}")
+                
+                # MAX RETRIES: If payment has been stuck >5 times, mark as abandoned
+                if retry_count >= 5:
+                    logger.error(f"     ❌ Payment {stuck['payment_id']} exceeded max retries (5), marking as 'abandoned'")
+                    c.execute("""
+                        UPDATE pending_sol_payments 
+                        SET status = 'abandoned'
+                        WHERE payment_id = ?
+                    """, (stuck['payment_id'],))
+                else:
+                    # Increment retry counter and recover to pending
+                    logger.warning(f"     ♻️ Recovering payment {stuck['payment_id']} to 'pending' (retry {retry_count + 1}/5)")
+                    c.execute("""
+                        UPDATE pending_sol_payments 
+                        SET status = 'pending', retry_count = retry_count + 1
+                        WHERE payment_id = ?
+                    """, (stuck['payment_id'],))
+            
             conn.commit()
+            logger.warning(f"  ✅ [RECOVERY] Processed {len(stuck_payments)} stuck payment(s)")
         else:
             logger.debug("  ✅ No stuck payments found")
         
@@ -1067,31 +1133,42 @@ async def check_pending_payments(context):
             if datetime.now(timezone.utc) > expires_at:
                 logger.info(f"⏱️ Payment {payment_id} expired")
                 
+                # SAFETY: Only expire if status is 'pending' to avoid race with processing thread
                 # Open a new connection for this update
                 expire_conn = None
                 try:
                     expire_conn = get_db_connection()
                     expire_c = expire_conn.cursor()
+                    
+                    # CRITICAL: Only update if status is 'pending' (not 'processing' or 'confirmed')
                     expire_c.execute("""
                         UPDATE pending_sol_payments 
                         SET status = 'expired' 
-                        WHERE payment_id = ? AND status IN ('pending', 'processing', 'failed')
+                        WHERE payment_id = ? AND status = 'pending'
                     """, (payment_id,))
+                    
+                    rows_updated = expire_c.rowcount
                     expire_conn.commit()
+                    
+                    if rows_updated > 0:
+                        logger.info(f"  ✅ Payment {payment_id} marked as expired")
+                        
+                        # Unreserve basket items ONLY if we successfully expired the payment
+                        try:
+                            basket_snapshot = json.loads(payment['basket_snapshot'])
+                            from user import _unreserve_basket_items
+                            await asyncio.to_thread(_unreserve_basket_items, basket_snapshot)
+                            logger.info(f"  ♻️ Unreserved items for expired payment {payment_id}")
+                        except Exception as e:
+                            logger.error(f"  ❌ Error unreserving items: {e}")
+                    else:
+                        logger.info(f"  ⏭️ Payment {payment_id} not expired (status not 'pending', likely being processed)")
+                        
                 except Exception as expire_error:
                     logger.error(f"Error marking payment {payment_id} as expired: {expire_error}")
                 finally:
                     if expire_conn:
                         expire_conn.close()
-                
-                # Unreserve basket items
-                try:
-                    basket_snapshot = json.loads(payment['basket_snapshot'])
-                    from user import _unreserve_basket_items
-                    await asyncio.to_thread(_unreserve_basket_items, basket_snapshot)
-                    logger.info(f"♻️ Unreserved items for expired payment {payment_id}")
-                except Exception as e:
-                    logger.error(f"Error unreserving items: {e}")
                 
                 continue
             
