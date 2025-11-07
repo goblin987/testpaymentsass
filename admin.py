@@ -2085,14 +2085,18 @@ async def handle_adm_manage_products_type(update: Update, context: ContextTypes.
         if not products:
             full_msg += "No products of this type found here."
         else:
-             header = "ID | Size | Price | Status (Avail/Reserved)\n" + "----------------------------------------\n"
+             header = "ID | Size | Price | Stock | Text Preview\n" + "=" * 50 + "\n"
              full_msg += header
              items_text_list = []
              for prod in products:
                 prod_id, size_str, price_str = prod['id'], prod['size'], format_currency(prod['price'])
                 status_str = f"{prod['available']}/{prod['reserved']}"
-                items_text_list.append(f"{prod_id} | {size_str} | {price_str}€ | {status_str}")
-                keyboard.append([InlineKeyboardButton(f"🗑️ Delete ID {prod_id}", callback_data=f"adm_delete_prod|{prod_id}")])
+                # Add text preview to help identify products
+                text_preview = (prod['name'] or "")[:30]
+                if len(prod['name'] or "") > 30:
+                    text_preview += "..."
+                items_text_list.append(f"#{prod_id} | {size_str} | {price_str}€ | {status_str} | {text_preview}")
+                keyboard.append([InlineKeyboardButton(f"🗑️ Delete #{prod_id}", callback_data=f"adm_delete_prod|{prod_id}")])
              full_msg += "\n".join(items_text_list)
 
         keyboard.append([InlineKeyboardButton("⬅️ Back to Types", callback_data=f"adm_manage_products_dist|{city_id}|{dist_id}")])
