@@ -261,8 +261,8 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
     if db_update_successful:
         # Clear user data (only if context has modifiable user_data - not from background task)
         try:
-        context.user_data['basket'] = []
-        context.user_data.pop('applied_discount', None)
+            context.user_data['basket'] = []
+            context.user_data.pop('applied_discount', None)
         except (TypeError, AttributeError):
             # Context is from background task (Application object) - user_data is read-only, skip cleanup
             logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
