@@ -553,23 +553,43 @@ async def verify_sol_transaction(signature: str) -> Optional[Dict]:
             )
             return response
         
+        logger.debug(f"        🔍 Fetching TX {signature[:16]}... from RPC...")
         response = await asyncio.to_thread(fetch_transaction)
         
-        if response and response.value:
-            tx_data = response.value
-            # Check if transaction succeeded
-            if tx_data.transaction.meta and tx_data.transaction.meta.err is None:
-                return {
-                    'signature': signature,
-                    'confirmed': True,
-                    'block_time': tx_data.block_time,
-                    'slot': tx_data.slot
-                }
+        if not response:
+            logger.debug(f"        ⏳ No response (TX not yet on chain)")
+            return None
         
-        return None
+        if not response.value:
+            logger.debug(f"        ⏳ No value in response (TX not yet confirmed)")
+            return None
+            
+        tx_data = response.value
+        logger.debug(f"        ✅ TX data received")
+        
+        # Check if transaction succeeded
+        if not tx_data.transaction:
+            logger.debug(f"        ❌ No transaction in tx_data")
+            return None
+            
+        if not tx_data.transaction.meta:
+            logger.debug(f"        ❌ No meta in transaction")
+            return None
+        
+        if tx_data.transaction.meta.err is not None:
+            logger.error(f"        ❌ Transaction FAILED: {tx_data.transaction.meta.err}")
+            return None
+        
+        logger.debug(f"        ✅ TX confirmed with no errors")
+        return {
+            'signature': signature,
+            'confirmed': True,
+            'block_time': tx_data.block_time,
+            'slot': tx_data.slot
+        }
         
     except Exception as e:
-        logger.error(f"Error verifying transaction {signature}: {e}")
+        logger.error(f"Error verifying transaction {signature[:16]}...: {e}", exc_info=True)
         return None
 
 
@@ -910,16 +930,24 @@ async def send_sol_transaction(
             logger.error(f"     ❌ send_tx returned None")
             return None
         
-        logger.debug(f"     ✅ Transaction sent, waiting for confirmation...")
-        # Wait for confirmation
-        await asyncio.sleep(2)
-        confirmed = await verify_sol_transaction(signature)
-        if confirmed:
-            logger.info(f"     ✅ Transaction CONFIRMED: {signature[:16]}...")
-            return signature
-        else:
-            logger.error(f"     ❌ Transaction NOT confirmed: {signature[:16]}...")
-            return None
+        logger.info(f"     ✅ Transaction broadcast! Signature: {signature[:16]}...")
+        logger.info(f"     ⏳ Waiting for confirmation (up to 20 seconds)...")
+        
+        # Wait for confirmation with retries (Solana can take 5-15 seconds)
+        max_attempts = 4
+        for attempt in range(1, max_attempts + 1):
+            await asyncio.sleep(5)  # Wait 5 seconds between checks
+            logger.debug(f"     🔍 Confirmation check {attempt}/{max_attempts}...")
+            confirmed = await verify_sol_transaction(signature)
+            if confirmed:
+                logger.info(f"     ✅ Transaction CONFIRMED after {attempt * 5}s: {signature[:16]}...")
+                return signature
+            else:
+                logger.debug(f"     ⏳ Not confirmed yet, attempt {attempt}/{max_attempts}")
+        
+        logger.error(f"     ❌ Transaction NOT confirmed after {max_attempts * 5}s: {signature[:16]}...")
+        logger.error(f"     ℹ️  Check manually: https://solscan.io/tx/{signature}")
+        return None
         
     except Exception as e:
         logger.error(f"     ❌ Error sending SOL transaction: {e}", exc_info=True)
