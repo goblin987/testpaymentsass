@@ -1598,7 +1598,7 @@ async def check_pending_payments(context):
                         
                         if not forward_success:
                             logger.error(f"❌ Split forward failed: {forward_results}")
-                            # Mark payment as 'failed'
+                            # Mark payment as 'failed' and unreserve items
                             try:
                                 fail_conn = get_db_connection()
                                 fail_c = fail_conn.cursor()
@@ -1610,6 +1610,15 @@ async def check_pending_payments(context):
                                 fail_conn.commit()
                                 fail_conn.close()
                                 logger.warning(f"⚠️ Payment {payment_id} marked as failed - manual intervention needed")
+                                
+                                # Unreserve basket items since payment failed
+                                try:
+                                    basket_snapshot = json.loads(payment['basket_snapshot'])
+                                    from user import _unreserve_basket_items
+                                    await asyncio.to_thread(_unreserve_basket_items, basket_snapshot)
+                                    logger.info(f"  ♻️ Unreserved items for failed payment {payment_id}")
+                                except Exception as unreserve_error:
+                                    logger.error(f"  ❌ Error unreserving items for failed payment: {unreserve_error}")
                             except Exception as mark_error:
                                 logger.error(f"Error marking payment as failed: {mark_error}")
                             continue
