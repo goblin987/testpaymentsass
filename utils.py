@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # --- Render Disk Path Configuration ---
-RENDER_DISK_MOUNT_PATH = ' /mnt/data'
+RENDER_DISK_MOUNT_PATH = '/mnt/data'
 DATABASE_PATH = os.path.join(RENDER_DISK_MOUNT_PATH, 'shop.db')
 MEDIA_DIR = os.path.join(RENDER_DISK_MOUNT_PATH, 'media')
 BOT_MEDIA_JSON_PATH = os.path.join(RENDER_DISK_MOUNT_PATH, 'bot_media.json')
