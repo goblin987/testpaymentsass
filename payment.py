@@ -560,8 +560,8 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
             return False # Indicate partial failure
     else: # Purchase failed at DB level
         try:
-        context.user_data['basket'] = []
-        context.user_data.pop('applied_discount', None)
+            context.user_data['basket'] = []
+            context.user_data.pop('applied_discount', None)
         except (TypeError, AttributeError):
             logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
         if chat_id: await send_message_with_retry(context.bot, chat_id, lang_data.get("error_processing_purchase_contact_support", "❌ Error processing purchase."), parse_mode=None)
