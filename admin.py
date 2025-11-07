@@ -635,14 +635,26 @@ async def handle_sales_dashboard(update: Update, context: ContextTypes.DEFAULT_T
             result = c.fetchone()
             revenue = result['total_revenue'] if result else 0.0
             units = result['total_units'] if result else 0
+            
+            # Get balance-paid purchases (topup usage)
+            c.execute("SELECT COALESCE(SUM(price_paid), 0.0) as balance_revenue, COUNT(*) as balance_units FROM purchases WHERE purchase_date BETWEEN ? AND ? AND paid_with_balance = 1", (start, end))
+            balance_result = c.fetchone()
+            balance_revenue = balance_result['balance_revenue'] if balance_result else 0.0
+            balance_units = balance_result['balance_units'] if balance_result else 0
+            
             aov = revenue / units if units > 0 else 0.0
             revenue_str = format_currency(revenue)
             aov_str = format_currency(aov)
+            balance_revenue_str = format_currency(balance_revenue)
+            balance_pct = (balance_revenue / revenue * 100) if revenue > 0 else 0.0
+            
             label_formatted = label_template.format(date_str) if date_str else label_template
             msg += f"{label_formatted}\n"
             msg += f"    Revenue: {revenue_str} EUR\n"
             msg += f"    Units Sold: {units}\n"
-            msg += f"    Avg Order Value: {aov_str} EUR\n\n"
+            msg += f"    Avg Order Value: {aov_str} EUR\n"
+            msg += f"    💰 Paid with Balance: {balance_revenue_str} EUR ({balance_pct:.1f}%)\n"
+            msg += f"    💰 Balance Units: {balance_units}\n\n"
     except sqlite3.Error as e:
         logger.error(f"DB error generating sales dashboard: {e}", exc_info=True)
         msg += "\n❌ Error fetching dashboard data."

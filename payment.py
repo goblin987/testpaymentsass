@@ -100,11 +100,14 @@ async def process_successful_refill(user_id: int, amount_to_add_eur: Decimal, pa
 
 
 # --- HELPER: Finalize Purchase (Send Caption Separately) ---
-async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_used: str | None, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_used: str | None, context: ContextTypes.DEFAULT_TYPE, paid_with_balance: bool = False) -> bool:
     """
     Shared logic to finalize a purchase after payment confirmation (balance or crypto).
     Decrements stock, adds purchase record, sends media first, then text separately,
     cleans up product records.
+    
+    Args:
+        paid_with_balance: If True, marks purchases as paid with balance (for tracking topup usage)
     """
     # Get chat_id - handle both regular Context and Application objects (from background tasks)
     chat_id = user_id  # Default to user_id
@@ -203,7 +206,8 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
 
             purchases_to_insert.append((
                 user_id, product_id, item_name, item_product_type, item_size,
-                item_price_paid_float, item_city, item_district, purchase_time_iso
+                item_price_paid_float, item_city, item_district, purchase_time_iso,
+                1 if paid_with_balance else 0  # Track if paid with balance
             ))
             processed_product_ids.append(product_id)
             # For pickup details message, use snapshot's original_text and other details
@@ -215,7 +219,7 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
             if chat_id: await send_message_with_retry(context.bot, chat_id, lang_data.get("error_processing_purchase_contact_support", "❌ Error processing purchase."), parse_mode=None)
             return False
 
-        c.executemany("INSERT INTO purchases (user_id, product_id, product_name, product_type, product_size, price_paid, city, district, purchase_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", purchases_to_insert)
+        c.executemany("INSERT INTO purchases (user_id, product_id, product_name, product_type, product_size, price_paid, city, district, purchase_date, paid_with_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", purchases_to_insert)
         c.execute("UPDATE users SET total_purchases = total_purchases + ? WHERE user_id = ?", (len(purchases_to_insert), user_id))
         if discount_code_used:
             # Atomically increment discount code usage only if limit not exceeded
@@ -257,8 +261,8 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
     if db_update_successful:
         # Clear user data (only if context has modifiable user_data - not from background task)
         try:
-            context.user_data['basket'] = []
-            context.user_data.pop('applied_discount', None)
+        context.user_data['basket'] = []
+        context.user_data.pop('applied_discount', None)
         except (TypeError, AttributeError):
             # Context is from background task (Application object) - user_data is read-only, skip cleanup
             logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
@@ -556,8 +560,8 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
             return False # Indicate partial failure
     else: # Purchase failed at DB level
         try:
-            context.user_data['basket'] = []
-            context.user_data.pop('applied_discount', None)
+        context.user_data['basket'] = []
+        context.user_data.pop('applied_discount', None)
         except (TypeError, AttributeError):
             logger.debug("Skipping user_data cleanup (called from background payment monitoring)")
         if chat_id: await send_message_with_retry(context.bot, chat_id, lang_data.get("error_processing_purchase_contact_support", "❌ Error processing purchase."), parse_mode=None)
@@ -615,8 +619,8 @@ async def process_purchase_with_balance(user_id: int, amount_to_deduct: Decimal,
     # 3. Finalize purchase ONLY if balance was successfully deducted
     if db_balance_deducted:
         logger.info(f"Calling _finalize_purchase for user {user_id} after balance deduction.")
-        # Now call the shared finalization logic
-        finalize_success = await _finalize_purchase(user_id, basket_snapshot, discount_code_used, context)
+        # Now call the shared finalization logic (mark as paid with balance)
+        finalize_success = await _finalize_purchase(user_id, basket_snapshot, discount_code_used, context, paid_with_balance=True)
         if not finalize_success:
             # Critical issue: Balance deducted but finalization failed.
             logger.critical(f"CRITICAL: Balance deducted for user {user_id} but _finalize_purchase FAILED! Attempting to refund.")

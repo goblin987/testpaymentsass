@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # --- Render Disk Path Configuration ---
-RENDER_DISK_MOUNT_PATH = '/mnt/data'
+RENDER_DISK_MOUNT_PATH = ' /mnt/data'
 DATABASE_PATH = os.path.join(RENDER_DISK_MOUNT_PATH, 'shop.db')
 MEDIA_DIR = os.path.join(RENDER_DISK_MOUNT_PATH, 'media')
 BOT_MEDIA_JSON_PATH = os.path.join(RENDER_DISK_MOUNT_PATH, 'bot_media.json')
@@ -1285,9 +1285,18 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, product_id INTEGER,
                 product_name TEXT NOT NULL, product_type TEXT NOT NULL, product_size TEXT NOT NULL,
                 price_paid REAL NOT NULL, city TEXT NOT NULL, district TEXT NOT NULL, purchase_date TEXT NOT NULL,
+                paid_with_balance INTEGER DEFAULT 0,
                 FOREIGN KEY(user_id) REFERENCES users(user_id),
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
             )''')
+            
+            # Add paid_with_balance column if it doesn't exist (migration)
+            try:
+                c.execute("SELECT paid_with_balance FROM purchases LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("Adding paid_with_balance column to purchases table...")
+                c.execute("ALTER TABLE purchases ADD COLUMN paid_with_balance INTEGER DEFAULT 0")
+            
             # reviews table
             c.execute('''CREATE TABLE IF NOT EXISTS reviews (
                 review_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,

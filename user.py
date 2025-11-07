@@ -2454,6 +2454,7 @@ async def handle_refill(update: Update, context: ContextTypes.DEFAULT_TYPE, para
 
 # <<< MODIFIED: Use SUPPORTED_CRYPTO dictionary >>>
 async def handle_refill_amount_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Modified to only accept SOL deposits for topup."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     state = context.user_data.get("state")
@@ -2466,8 +2467,6 @@ async def handle_refill_amount_message(update: Update, context: ContextTypes.DEF
     amount_too_high_msg = lang_data.get("amount_too_high_msg", "Amount too high. Max: 10000 EUR.")
     invalid_amount_format_msg = lang_data.get("invalid_amount_format_msg", "Invalid amount format (e.g., 10.50).")
     unexpected_error_msg = lang_data.get("unexpected_error_msg", "Unexpected error. Try again.")
-    choose_crypto_prompt_template = lang_data.get("choose_crypto_prompt", "Top up {amount} EUR. Choose crypto:")
-    cancel_top_up_button = lang_data.get("cancel_top_up_button", "Cancel Top Up")
 
     if not update.message or not update.message.text:
         await send_message_with_retry(context.bot, chat_id, f"❌ {send_amount_as_text}", parse_mode=None)
@@ -2486,39 +2485,32 @@ async def handle_refill_amount_message(update: Update, context: ContextTypes.DEF
             await send_message_with_retry(context.bot, chat_id, f"❌ {amount_too_high_msg}", parse_mode=None)
             return
 
-        context.user_data['refill_eur_amount'] = float(refill_amount_decimal)
-        context.user_data['state'] = 'awaiting_refill_crypto_choice' # State remains specific to refill
-        logger.info(f"User {user_id} entered refill EUR: {refill_amount_decimal:.2f}. State -> awaiting_refill_crypto_choice")
+        # Clear state immediately
+        context.user_data.pop('state', None)
+        logger.info(f"User {user_id} entered refill amount: {refill_amount_decimal:.2f} EUR. Creating SOL topup payment.")
 
-        # --- Generate buttons using SUPPORTED_CRYPTO ---
-        asset_buttons = []
-        row = []
-        # Iterate through the globally defined dictionary
-        for code, display_name in SUPPORTED_CRYPTO.items():
-            # Use specific refill callback, passing the NOWPayments code
-            row.append(InlineKeyboardButton(display_name, callback_data=f"select_refill_crypto|{code}"))
-            if len(row) >= 3: # Adjust number per row if needed
-                asset_buttons.append(row)
-                row = []
-        if row:
-            asset_buttons.append(row)
-        # --- End Button Generation ---
+        # Import here to avoid circular imports
+        from sol_payment import create_sol_topup_payment
 
-        asset_buttons.append([InlineKeyboardButton(f"❌ {cancel_top_up_button}", callback_data="profile")])
-
-        refill_amount_str = format_currency(refill_amount_decimal)
-        choose_crypto_msg = choose_crypto_prompt_template.format(amount=refill_amount_str)
-
-        await send_message_with_retry(context.bot, chat_id, choose_crypto_msg, reply_markup=InlineKeyboardMarkup(asset_buttons), parse_mode=None)
+        # Create SOL topup payment (always goes to wallet 1)
+        result = await create_sol_topup_payment(user_id, refill_amount_decimal, context)
+        
+        if result['status'] == 'success':
+            logger.info(f"✅ SOL topup payment created for user {user_id}: {result['payment_id']}")
+            # Payment instructions are sent by create_sol_topup_payment
+        else:
+            error_msg = result.get('message', 'Unknown error creating topup payment.')
+            logger.error(f"Failed to create SOL topup payment for user {user_id}: {error_msg}")
+            await send_message_with_retry(context.bot, chat_id, f"❌ {unexpected_error_msg}", parse_mode=None)
 
     except ValueError:
         await send_message_with_retry(context.bot, chat_id, f"❌ {invalid_amount_format_msg}", parse_mode=None)
+        context.user_data.pop('state', None)
         return
     except Exception as e:
         logger.error(f"Error processing refill amount user {user_id}: {e}", exc_info=True)
         await send_message_with_retry(context.bot, chat_id, f"❌ {unexpected_error_msg}", parse_mode=None)
         context.user_data.pop('state', None)
-        context.user_data.pop('refill_eur_amount', None)
 
 # --- Single Item Discount Code Message Handler ---
 async def handle_single_item_discount_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -333,6 +333,154 @@ async def create_sol_payment(
         return {'error': 'internal_error'}
 
 
+async def create_sol_topup_payment(
+    user_id: int,
+    amount_eur: Decimal,
+    context
+) -> dict:
+    """
+    Create a SOL payment for balance topup.
+    All topup payments go to wallet 1.
+    
+    Returns:
+        dict with {'status': 'success', 'payment_id': ...} or {'status': 'error', 'message': ...}
+    """
+    from utils import LANGUAGES, send_message_with_retry, format_currency
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    
+    logger.info(f"💰 [CREATE SOL TOPUP] User {user_id}: Starting topup payment creation for {amount_eur} EUR")
+    
+    try:
+        # Get SOL price
+        sol_price = await get_sol_price_eur()
+        if not sol_price or sol_price <= Decimal('0'):
+            logger.error("  ❌ Failed to fetch SOL price")
+            return {'status': 'error', 'message': 'Failed to fetch SOL price'}
+        logger.debug(f"  ✅ SOL price: {sol_price:.2f} EUR")
+        
+        # Calculate SOL amount needed (add 1% buffer for price fluctuation)
+        sol_amount_base = (amount_eur / sol_price).quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        sol_amount = sol_amount_base * Decimal('1.01')  # 1% buffer
+        sol_amount = sol_amount.quantize(Decimal('0.000001'), rounding=ROUND_UP)
+        
+        # Add random offset to make each payment unique
+        random_offset = Decimal(str(random.randint(1, 9999))) / Decimal('1000000')
+        sol_amount = sol_amount + random_offset
+        logger.info(f"  ✅ Final topup amount: {sol_amount:.6f} SOL (base: {sol_amount_base:.6f}, buffer: +1%, offset: +{random_offset:.6f})")
+        
+        # Minimum SOL amount
+        min_sol = Decimal('0.01')
+        if sol_amount < min_sol:
+            logger.warning(f"  ❌ Amount {sol_amount:.6f} SOL below minimum {min_sol} SOL")
+            return {
+                'status': 'error',
+                'message': f'Amount too low. Minimum: {float(min_sol)} SOL'
+            }
+        
+        # All topup payments go to wallet 1
+        target_wallet = 'wallet1'
+        logger.info(f"  💳 Topup destination: {target_wallet}")
+        
+        # Generate unique payment ID with TOPUP prefix
+        payment_id = f"SOL_TOPUP_{user_id}_{int(time.time())}_{hex(int(time.time() * 1000000))[-6:]}"
+        
+        # Store pending payment in database
+        conn = None
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            
+            now = datetime.now(timezone.utc)
+            expires = now + timedelta(minutes=20)  # 20 minute expiry
+            
+            # Use empty basket_snapshot for topup (JSON array)
+            c.execute("""
+                INSERT INTO pending_sol_payments 
+                (payment_id, user_id, expected_sol_amount, expected_wallet, 
+                 basket_snapshot, discount_code, created_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                payment_id,
+                user_id,
+                float(sol_amount),
+                target_wallet,
+                json.dumps([]),  # Empty basket for topup
+                None,  # No discount code
+                now.isoformat(),
+                expires.isoformat()
+            ))
+            
+            conn.commit()
+            logger.info(f"✅ [CREATE SOL TOPUP] Payment {payment_id} created: {sol_amount:.6f} SOL (~{amount_eur} EUR) → {target_wallet}")
+            
+        except sqlite3.Error as e:
+            logger.error(f"Database error creating SOL topup payment: {e}")
+            return {'status': 'error', 'message': 'Database error'}
+        finally:
+            if conn:
+                conn.close()
+        
+        # Get wallet address
+        wallet_address = SOL_WALLET1_ADDRESS
+        
+        # Send payment instructions to user
+        chat_id = context._chat_id or context._user_id or user_id
+        user_lang = context.user_data.get("lang", "en")
+        lang_data = LANGUAGES.get(user_lang, LANGUAGES['en'])
+        
+        # Format message
+        amount_eur_str = format_currency(amount_eur)
+        
+        msg = f"""🔄 **Top Up Your Balance**
+
+💰 Amount: {amount_eur_str} EUR
+📊 SOL Amount: {sol_amount:.6f} SOL
+💳 SOL Price: {sol_price:.2f} EUR
+
+**Send exactly this amount:**
+`{sol_amount:.6f}` SOL
+
+**To this address:**
+`{wallet_address}`
+
+⏱️ Payment valid for: 20 minutes
+🔍 Payment ID: `{payment_id}`
+
+Your balance will be automatically credited once payment is confirmed."""
+        
+        # Add cancel button
+        keyboard = [[
+            InlineKeyboardButton("❌ Cancel", callback_data="profile")
+        ]]
+        
+        try:
+            await send_message_with_retry(
+                context.bot,
+                chat_id,
+                msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        except Exception as send_err:
+            logger.error(f"Error sending topup payment instructions: {send_err}")
+            # Don't fail the whole operation if message sending fails
+        
+        logger.info(f"🎉 [CREATE SOL TOPUP] User {user_id}: Topup payment ready! {sol_amount:.6f} SOL to wallet1")
+        
+        return {
+            'status': 'success',
+            'payment_id': payment_id,
+            'sol_amount': float(sol_amount),
+            'sol_price_eur': float(sol_price),
+            'amount_eur': float(amount_eur),
+            'wallet_address': wallet_address
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating SOL topup payment: {e}", exc_info=True)
+        return {'status': 'error', 'message': 'Internal error'}
+
+
 async def retry_rpc_call(func, max_retries=3, base_delay=1.0):
     """Retry RPC calls with exponential backoff for 429 errors."""
     for attempt in range(max_retries):
@@ -1533,14 +1681,26 @@ async def check_pending_payments(context):
                     basket_snapshot = json.loads(payment['basket_snapshot'])
                     discount_code = payment['discount_code']
                     
-                    await finalize_sol_purchase(
-                        user_id=user_id,
-                        basket_snapshot=basket_snapshot,
-                        discount_code=discount_code,
-                        payment_id=payment_id,
-                        transaction_signature=tx_signature,
-                        context=context
-                    )
+                    # Check if this is a topup payment
+                    if payment_id.startswith('SOL_TOPUP_'):
+                        logger.info(f"🔄 Processing topup payment {payment_id} for user {user_id}")
+                        await finalize_sol_topup(
+                            user_id=user_id,
+                            amount_eur=Decimal(str(tx_amount * expected_amount_decimal / Decimal(str(expected_amount)))),
+                            payment_id=payment_id,
+                            transaction_signature=tx_signature,
+                            context=context
+                        )
+                    else:
+                        # Regular purchase
+                        await finalize_sol_purchase(
+                            user_id=user_id,
+                            basket_snapshot=basket_snapshot,
+                            discount_code=discount_code,
+                            payment_id=payment_id,
+                            transaction_signature=tx_signature,
+                            context=context
+                        )
                     
                     break  # Payment processed, move to next pending payment
                 else:
@@ -1589,6 +1749,42 @@ async def finalize_sol_purchase(user_id, basket_snapshot, discount_code, payment
                 f"User: {user_id}\n"
                 f"TX: {transaction_signature}\n"
                 f"Payment confirmed but purchase processing failed!"
+            )
+            try:
+                await send_message_with_retry(
+                    context.bot,
+                    get_first_primary_admin_id(),
+                    admin_msg,
+                    parse_mode=None
+                )
+            except Exception:
+                pass
+
+
+async def finalize_sol_topup(user_id, amount_eur, payment_id, transaction_signature, context):
+    """Finalize balance topup after SOL payment confirmed."""
+    logger.info(f"🔄 Finalizing SOL topup for user {user_id}, payment {payment_id}, amount: {amount_eur} EUR")
+    
+    # Import here to avoid circular imports
+    from payment import process_successful_refill
+    
+    # Credit the user's balance
+    success = await process_successful_refill(user_id, amount_eur, payment_id, context)
+    
+    if success:
+        logger.info(f"✅ SOL topup completed successfully for user {user_id}")
+    else:
+        logger.error(f"❌ Failed to finalize SOL topup for user {user_id}")
+        
+        # Alert admin
+        if get_first_primary_admin_id():
+            admin_msg = (
+                f"⚠️ TOPUP FINALIZATION FAILED\n"
+                f"Payment: {payment_id}\n"
+                f"User: {user_id}\n"
+                f"Amount: {amount_eur} EUR\n"
+                f"TX: {transaction_signature}\n"
+                f"Payment confirmed but balance credit failed!"
             )
             try:
                 await send_message_with_retry(
